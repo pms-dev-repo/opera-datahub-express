@@ -1,0 +1,13 @@
+reports:
+  resfu:
+    name: hotel_figures
+  res_d:
+    name: arrivals
+  depar:
+    name: departures
+  pr_bi:
+    name: birthdays
+  trans:
+    name: transportation
+  snaps:
+    name: snapshot_stays
