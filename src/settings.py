@@ -6,7 +6,7 @@ load_dotenv()
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 EMAIL_HOST = os.getenv("EMAIL_HOST", "imap.gmail.com")
-EMAIL_PORT = int(os.getenv("EMAIL_PORT", "993"))
+EMAIL_PORT = int(os.getenv("EMAIL_PORT") or "993")
 EMAIL_USER = os.getenv("EMAIL_USER", "")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "")
 EMAIL_FOLDER = os.getenv("EMAIL_FOLDER", "INBOX")
