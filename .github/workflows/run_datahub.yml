@@ -3,7 +3,7 @@ name: Run Opera DataHub Express
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/15 * * * *"
 
 jobs:
   run-datahub:
