@@ -1,19 +1,28 @@
-name: DataHub Express
+name: Run Opera DataHub Express
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 10 * * *"
+    - cron: "*/30 * * * *"
 
 jobs:
-  run:
+  run-datahub:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-      - run: pip install -r requirements.txt
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
       - name: Run DataHub
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -22,5 +31,6 @@ jobs:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_FOLDER: ${{ secrets.EMAIL_FOLDER }}
-          EMAIL_DELETE_AFTER_SUCCESS: "true"
-        run: python -m src.app
+          EMAIL_DELETE_AFTER_SUCCESS: ${{ secrets.EMAIL_DELETE_AFTER_SUCCESS }}
+        run: |
+          python -m src.app
