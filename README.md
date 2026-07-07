@@ -167,7 +167,7 @@ Current schedule:
 
 ```yaml
 schedule:
-  - cron: "*/30 * * * *"
+  - cron: "*/15 * * * *"
 ```
 
 Required Repository Secrets:
