@@ -14,7 +14,8 @@ def download_csv_attachments(
     folder: str,
     incoming_dir: Path,
 ) -> list[tuple[str, bytes]]:
-    """Download PDF attachments. Returns [(folder, message_id)] for messages touched."""
+    """Download unread PDF attachments only. Returns [(folder, message_id)]."""
+
     touched: list[tuple[str, bytes]] = []
 
     if not user or not password:
@@ -27,7 +28,8 @@ def download_csv_attachments(
     mail.login(user, password)
     mail.select(f'"{folder}"')
 
-    status, data = mail.search(None, "ALL")
+    # Gmail IMAP supports UNSEEN. HASATTACHMENT may not work in all IMAP servers.
+    status, data = mail.search(None, "UNSEEN")
 
     if status != "OK":
         mail.logout()
@@ -65,6 +67,8 @@ def download_csv_attachments(
             saved_any = True
 
         if saved_any:
+            # Mark as seen so it will not be picked up again if deletion fails.
+            mail.store(msg_id, "+FLAGS", "\\Seen")
             touched.append((folder, msg_id))
 
     mail.logout()
