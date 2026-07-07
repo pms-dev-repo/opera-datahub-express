@@ -1,4 +1,4 @@
-name: Run Opera DataHub Express
+name: Run Cron
 
 on:
   workflow_dispatch:
