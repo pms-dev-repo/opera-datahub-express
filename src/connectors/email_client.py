@@ -31,6 +31,7 @@ def download_csv_attachments(
     status, data = mail.uid("search", None, "UNSEEN")
 
     if status != "OK":
+        print(f"Email search failed: {status} {data}")
         mail.logout()
         return touched
 
@@ -38,6 +39,7 @@ def download_csv_attachments(
         status, msg_data = mail.uid("fetch", uid, "(RFC822)")
 
         if status != "OK":
+            print(f"Email fetch failed for UID {uid.decode()}: {status}")
             continue
 
         msg = email.message_from_bytes(msg_data[0][1])
@@ -71,19 +73,6 @@ def download_csv_attachments(
     return touched
 
 
-def _get_trash_folder(mail: imaplib.IMAP4_SSL) -> str:
-    status, folders = mail.list()
-
-    if status == "OK":
-        for raw in folders:
-            line = raw.decode(errors="ignore")
-
-            if "\\Trash" in line:
-                return line.split(' "/" ')[-1].strip('"')
-
-    return "[Gmail]/Trash"
-
-
 def delete_messages(
     host: str,
     port: int,
@@ -91,14 +80,16 @@ def delete_messages(
     password: str,
     touched: list[tuple[str, bytes]],
 ) -> None:
+    """
+    For Gmail labels, the most reliable behavior is removing the processed label.
+    This makes the emails disappear from label:SLANE without depending on Trash/MOVE.
+    """
+
     if not touched:
         return
 
     mail = imaplib.IMAP4_SSL(host, port)
     mail.login(user, password)
-
-    trash_folder = _get_trash_folder(mail)
-    print(f"Trash folder detected: {trash_folder}")
 
     by_folder: dict[str, list[bytes]] = {}
 
@@ -109,25 +100,32 @@ def delete_messages(
         mail.select(f'"{folder}"')
 
         for uid in uids:
-            # First try IMAP MOVE using UID.
-            status, _ = mail.uid("MOVE", uid, f'"{trash_folder}"')
+            status, response = mail.uid(
+                "STORE",
+                uid,
+                "-X-GM-LABELS",
+                f'"{folder}"',
+            )
 
-            if status == "OK":
-                print(f"Moved UID {uid.decode()} to Trash")
-                continue
+            print(
+                f"Remove label {folder} from UID {uid.decode()}: "
+                f"{status} {response}"
+            )
 
-            # Fallback: copy to trash, mark deleted, expunge.
-            copy_status, _ = mail.uid("COPY", uid, f'"{trash_folder}"')
+            if status != "OK":
+                status, response = mail.uid(
+                    "STORE",
+                    uid,
+                    "+FLAGS",
+                    "\\Deleted",
+                )
 
-            if copy_status == "OK":
-                mail.uid("STORE", uid, "+FLAGS", "\\Deleted")
-                print(f"Copied UID {uid.decode()} to Trash and deleted original")
-            else:
-                # Last Gmail fallback: remove label and add Trash label.
-                mail.uid("STORE", uid, "+X-GM-LABELS", r'"\Trash"')
-                mail.uid("STORE", uid, "+FLAGS", "\\Deleted")
-                print(f"Deleted UID {uid.decode()} using Gmail fallback")
+                print(
+                    f"Fallback delete UID {uid.decode()}: "
+                    f"{status} {response}"
+                )
 
-        mail.expunge()
+        status, response = mail.expunge()
+        print(f"EXPUNGE {folder}: {status} {response}")
 
     mail.logout()
