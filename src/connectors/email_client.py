@@ -98,7 +98,16 @@ def delete_messages(
         mail.select(f'"{folder}"')
 
         for msg_id in ids:
-            mail.store(msg_id, "+FLAGS", "\\Deleted")
+            # Gmail: move message to Trash
+            result = mail.store(
+                msg_id,
+                "+X-GM-LABELS",
+                r'"\Trash"'
+            )
+
+            if result[0] != "OK":
+                # Fallback: standard IMAP delete
+                mail.store(msg_id, "+FLAGS", "\\Deleted")
 
         mail.expunge()
 
