@@ -45,6 +45,9 @@ def download_csv_attachments(
         msg = email.message_from_bytes(msg_data[0][1])
         saved_any = False
 
+        subject = msg.get("Subject", "")
+        print(f"Reading UID {uid.decode()} | Subject: {subject}")
+
         for part in msg.walk():
             filename = part.get_filename()
 
@@ -57,13 +60,18 @@ def download_csv_attachments(
             payload = part.get_payload(decode=True)
 
             if not payload:
+                print(f"Attachment empty: {filename}")
                 continue
 
             safe_name = Path(filename).name
             out_path = incoming_dir / safe_name
             out_path.write_bytes(payload)
 
-            print(f"Downloaded: {out_path}")
+            print(
+                f"Downloaded: {out_path} "
+                f"({len(payload):,} bytes)"
+            )
+
             saved_any = True
 
         if saved_any:
@@ -80,11 +88,6 @@ def delete_messages(
     password: str,
     touched: list[tuple[str, bytes]],
 ) -> None:
-    """
-    For Gmail labels, the most reliable behavior is removing the processed label.
-    This makes the emails disappear from label:SLANE without depending on Trash/MOVE.
-    """
-
     if not touched:
         return
 

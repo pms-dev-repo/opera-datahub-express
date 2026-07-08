@@ -66,6 +66,9 @@ def run() -> None:
 
     for path in files:
         try:
+            size = path.stat().st_size if path.exists() else 0
+            print(f"Processing: {path.name} ({size:,} bytes)")
+
             table, df = process_file(path)
 
             replace_by_dates(engine, table, df)
@@ -78,6 +81,8 @@ def run() -> None:
                 "SUCCESS",
             )
 
+            print(f"{table}: loaded {len(df)} rows")
+
             move_file(path, settings.ARCHIVE_DIR)
 
         except Exception as exc:
@@ -86,6 +91,10 @@ def run() -> None:
             print()
             print("=" * 80)
             print(f"ERROR processing {path.name}")
+
+            if path.exists():
+                print(f"File size: {path.stat().st_size:,} bytes")
+
             traceback.print_exc()
             print("=" * 80)
 
