@@ -28,7 +28,6 @@ def download_csv_attachments(
     mail.login(user, password)
     mail.select(f'"{folder}"')
 
-    # Gmail IMAP supports UNSEEN. HASATTACHMENT may not work in all IMAP servers.
     status, data = mail.search(None, "UNSEEN")
 
     if status != "OK":
@@ -60,20 +59,29 @@ def download_csv_attachments(
 
             safe_name = Path(filename).name
             out_path = incoming_dir / safe_name
-
             out_path.write_bytes(payload)
 
             print(f"Downloaded: {out_path}")
             saved_any = True
 
         if saved_any:
-            # Mark as seen so it will not be picked up again if deletion fails.
-            mail.store(msg_id, "+FLAGS", "\\Seen")
             touched.append((folder, msg_id))
 
     mail.logout()
-
     return touched
+
+
+def _get_trash_folder(mail: imaplib.IMAP4_SSL) -> str:
+    status, folders = mail.list()
+
+    if status == "OK":
+        for raw in folders:
+            line = raw.decode(errors="ignore")
+
+            if "\\Trash" in line:
+                return line.split(' "/" ')[-1].strip('"')
+
+    return "[Gmail]/Trash"
 
 
 def delete_messages(
@@ -89,6 +97,9 @@ def delete_messages(
     mail = imaplib.IMAP4_SSL(host, port)
     mail.login(user, password)
 
+    trash_folder = _get_trash_folder(mail)
+    print(f"Trash folder detected: {trash_folder}")
+
     by_folder: dict[str, list[bytes]] = {}
 
     for folder, msg_id in touched:
@@ -98,16 +109,18 @@ def delete_messages(
         mail.select(f'"{folder}"')
 
         for msg_id in ids:
-            # Gmail: move message to Trash
-            result = mail.store(
-                msg_id,
-                "+X-GM-LABELS",
-                r'"\Trash"'
-            )
+            # Copy message to Trash
+            copy_status, _ = mail.copy(msg_id, f'"{trash_folder}"')
 
-            if result[0] != "OK":
-                # Fallback: standard IMAP delete
+            if copy_status == "OK":
+                # Remove from current label/mailbox
                 mail.store(msg_id, "+FLAGS", "\\Deleted")
+                print(f"Deleted message {msg_id.decode()} from {folder}")
+            else:
+                # Gmail fallback
+                mail.store(msg_id, "+X-GM-LABELS", r'"\Trash"')
+                mail.store(msg_id, "+FLAGS", "\\Deleted")
+                print(f"Deleted message {msg_id.decode()} using Gmail fallback")
 
         mail.expunge()
 
