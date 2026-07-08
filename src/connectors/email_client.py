@@ -14,7 +14,7 @@ def download_csv_attachments(
     folder: str,
     incoming_dir: Path,
 ) -> list[tuple[str, bytes]]:
-    """Download unread PDF attachments only. Returns [(folder, message_id)]."""
+    """Download unread PDF attachments only. Returns [(folder, uid)]."""
 
     touched: list[tuple[str, bytes]] = []
 
@@ -28,14 +28,14 @@ def download_csv_attachments(
     mail.login(user, password)
     mail.select(f'"{folder}"')
 
-    status, data = mail.search(None, "UNSEEN")
+    status, data = mail.uid("search", None, "UNSEEN")
 
     if status != "OK":
         mail.logout()
         return touched
 
-    for msg_id in data[0].split():
-        status, msg_data = mail.fetch(msg_id, "(RFC822)")
+    for uid in data[0].split():
+        status, msg_data = mail.uid("fetch", uid, "(RFC822)")
 
         if status != "OK":
             continue
@@ -65,7 +65,7 @@ def download_csv_attachments(
             saved_any = True
 
         if saved_any:
-            touched.append((folder, msg_id))
+            touched.append((folder, uid))
 
     mail.logout()
     return touched
@@ -102,25 +102,31 @@ def delete_messages(
 
     by_folder: dict[str, list[bytes]] = {}
 
-    for folder, msg_id in touched:
-        by_folder.setdefault(folder, []).append(msg_id)
+    for folder, uid in touched:
+        by_folder.setdefault(folder, []).append(uid)
 
-    for folder, ids in by_folder.items():
+    for folder, uids in by_folder.items():
         mail.select(f'"{folder}"')
 
-        for msg_id in ids:
-            # Copy message to Trash
-            copy_status, _ = mail.copy(msg_id, f'"{trash_folder}"')
+        for uid in uids:
+            # First try IMAP MOVE using UID.
+            status, _ = mail.uid("MOVE", uid, f'"{trash_folder}"')
+
+            if status == "OK":
+                print(f"Moved UID {uid.decode()} to Trash")
+                continue
+
+            # Fallback: copy to trash, mark deleted, expunge.
+            copy_status, _ = mail.uid("COPY", uid, f'"{trash_folder}"')
 
             if copy_status == "OK":
-                # Remove from current label/mailbox
-                mail.store(msg_id, "+FLAGS", "\\Deleted")
-                print(f"Deleted message {msg_id.decode()} from {folder}")
+                mail.uid("STORE", uid, "+FLAGS", "\\Deleted")
+                print(f"Copied UID {uid.decode()} to Trash and deleted original")
             else:
-                # Gmail fallback
-                mail.store(msg_id, "+X-GM-LABELS", r'"\Trash"')
-                mail.store(msg_id, "+FLAGS", "\\Deleted")
-                print(f"Deleted message {msg_id.decode()} using Gmail fallback")
+                # Last Gmail fallback: remove label and add Trash label.
+                mail.uid("STORE", uid, "+X-GM-LABELS", r'"\Trash"')
+                mail.uid("STORE", uid, "+FLAGS", "\\Deleted")
+                print(f"Deleted UID {uid.decode()} using Gmail fallback")
 
         mail.expunge()
 
