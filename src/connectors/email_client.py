@@ -4,11 +4,26 @@ from pathlib import Path
 
 
 ALLOWED_EXTENSIONS = (".pdf",)
-GMAIL_ALL_MAIL = '"[Gmail]/All Mail"'
 
 
 def gmail_raw_query(label: str) -> str:
     return f'label:{label} is:unread has:attachment'
+
+
+def get_all_mail_folder(mail: imaplib.IMAP4_SSL) -> str:
+    status, folders = mail.list()
+
+    if status != "OK" or not folders:
+        return '"INBOX"'
+
+    for raw in folders:
+        line = raw.decode(errors="ignore")
+
+        if "\\All" in line:
+            mailbox = line.split(' "/" ')[-1]
+            return mailbox
+
+    return '"INBOX"'
 
 
 def download_csv_attachments(
@@ -32,7 +47,10 @@ def download_csv_attachments(
     mail = imaplib.IMAP4_SSL(host, port)
     mail.login(user, password)
 
-    select_status, select_data = mail.select(GMAIL_ALL_MAIL)
+    all_mail = get_all_mail_folder(mail)
+    print(f"Using mailbox: {all_mail}")
+
+    select_status, select_data = mail.select(all_mail)
     print(f"SELECT All Mail: {select_status} {select_data}")
 
     if select_status != "OK":
@@ -112,7 +130,10 @@ def delete_messages(
     mail = imaplib.IMAP4_SSL(host, port)
     mail.login(user, password)
 
-    select_status, select_data = mail.select(GMAIL_ALL_MAIL)
+    all_mail = get_all_mail_folder(mail)
+    print(f"Using mailbox for cleanup: {all_mail}")
+
+    select_status, select_data = mail.select(all_mail)
     print(f"SELECT All Mail for cleanup: {select_status} {select_data}")
 
     if select_status != "OK":
@@ -127,7 +148,6 @@ def delete_messages(
         )
         print(f"Before cleanup UID {uid.decode()}: {fetch_status} {fetch_data}")
 
-        # Remove the Gmail label used as the processing inbox.
         status, response = mail.uid(
             "STORE",
             uid,
@@ -140,7 +160,6 @@ def delete_messages(
             f"{status} {response}"
         )
 
-        # Mark as read so it is never picked up again by is:unread.
         seen_status, seen_response = mail.uid(
             "STORE",
             uid,
