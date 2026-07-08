@@ -8,7 +8,7 @@ on:
       - main
 
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "*/30 * * * *"
 
 jobs:
   run-datahub:
