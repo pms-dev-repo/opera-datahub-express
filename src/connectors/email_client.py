@@ -6,6 +6,24 @@ from pathlib import Path
 ALLOWED_EXTENSIONS = (".pdf",)
 
 
+def _print_folders(mail: imaplib.IMAP4_SSL) -> None:
+    status, folders = mail.list()
+
+    print("=" * 80)
+    print("IMAP FOLDERS")
+    print("=" * 80)
+
+    if status != "OK" or not folders:
+        print(f"Could not list folders: {status} {folders}")
+        print("=" * 80)
+        return
+
+    for raw in folders:
+        print(raw.decode(errors="ignore"))
+
+    print("=" * 80)
+
+
 def download_csv_attachments(
     host: str,
     port: int,
@@ -26,7 +44,18 @@ def download_csv_attachments(
 
     mail = imaplib.IMAP4_SSL(host, port)
     mail.login(user, password)
-    mail.select(f'"{folder}"')
+
+    _print_folders(mail)
+
+    select_status, select_data = mail.select(f'"{folder}"')
+    print(f"SELECT {folder}: {select_status} {select_data}")
+
+    status, flags = mail.response("PERMANENTFLAGS")
+    print(f"PERMANENTFLAGS {folder}: {status} {flags}")
+
+    if select_status != "OK":
+        mail.logout()
+        return touched
 
     status, data = mail.uid("search", None, "UNSEEN")
 
@@ -34,6 +63,8 @@ def download_csv_attachments(
         print(f"Email search failed: {status} {data}")
         mail.logout()
         return touched
+
+    print(f"UNSEEN UIDs found: {data}")
 
     for uid in data[0].split():
         status, msg_data = mail.uid("fetch", uid, "(RFC822)")
@@ -67,11 +98,7 @@ def download_csv_attachments(
             out_path = incoming_dir / safe_name
             out_path.write_bytes(payload)
 
-            print(
-                f"Downloaded: {out_path} "
-                f"({len(payload):,} bytes)"
-            )
-
+            print(f"Downloaded: {out_path} ({len(payload):,} bytes)")
             saved_any = True
 
         if saved_any:
@@ -94,15 +121,34 @@ def delete_messages(
     mail = imaplib.IMAP4_SSL(host, port)
     mail.login(user, password)
 
+    _print_folders(mail)
+
     by_folder: dict[str, list[bytes]] = {}
 
     for folder, uid in touched:
         by_folder.setdefault(folder, []).append(uid)
 
     for folder, uids in by_folder.items():
-        mail.select(f'"{folder}"')
+        select_status, select_data = mail.select(f'"{folder}"')
+        print(f"SELECT {folder} for cleanup: {select_status} {select_data}")
+
+        status, flags = mail.response("PERMANENTFLAGS")
+        print(f"PERMANENTFLAGS cleanup {folder}: {status} {flags}")
+
+        if select_status != "OK":
+            continue
 
         for uid in uids:
+            fetch_status, fetch_data = mail.uid(
+                "FETCH",
+                uid,
+                "(X-GM-LABELS FLAGS)"
+            )
+            print(
+                f"Before cleanup UID {uid.decode()}: "
+                f"{fetch_status} {fetch_data}"
+            )
+
             status, response = mail.uid(
                 "STORE",
                 uid,
@@ -113,6 +159,16 @@ def delete_messages(
             print(
                 f"Remove label {folder} from UID {uid.decode()}: "
                 f"{status} {response}"
+            )
+
+            fetch_status, fetch_data = mail.uid(
+                "FETCH",
+                uid,
+                "(X-GM-LABELS FLAGS)"
+            )
+            print(
+                f"After remove label UID {uid.decode()}: "
+                f"{fetch_status} {fetch_data}"
             )
 
             if status != "OK":
