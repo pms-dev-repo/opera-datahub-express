@@ -7,7 +7,7 @@ ALLOWED_EXTENSIONS = (".pdf",)
 
 
 def gmail_raw_query(label: str) -> str:
-    return f'label:{label} is:unread has:attachment'
+    return f"label:{label} is:unread has:attachment"
 
 
 def get_all_mail_folder(mail: imaplib.IMAP4_SSL) -> str:
@@ -20,8 +20,7 @@ def get_all_mail_folder(mail: imaplib.IMAP4_SSL) -> str:
         line = raw.decode(errors="ignore")
 
         if "\\All" in line:
-            mailbox = line.split(' "/" ')[-1]
-            return mailbox
+            return line.split(' "/" ')[-1]
 
     return '"INBOX"'
 
@@ -59,10 +58,10 @@ def download_csv_attachments(
 
     query = gmail_raw_query(folder)
 
-    status, data = mail.uid(
-        "SEARCH",
+    status, data = mail.search(
+        None,
         "X-GM-RAW",
-        query,
+        f'"{query}"',
     )
 
     print(f"GMAIL SEARCH QUERY: {query}")
@@ -72,7 +71,16 @@ def download_csv_attachments(
         mail.logout()
         return touched
 
-    for uid in data[0].split():
+    for msg_id in data[0].split():
+        status, uid_data = mail.fetch(msg_id, "(UID)")
+
+        if status != "OK" or not uid_data:
+            print(f"Could not get UID for message {msg_id.decode()}")
+            continue
+
+        uid_text = uid_data[0].decode(errors="ignore")
+        uid = uid_text.split("UID ")[-1].replace(")", "").strip().encode()
+
         status, msg_data = mail.uid("FETCH", uid, "(RFC822)")
 
         if status != "OK":
