@@ -4,24 +4,11 @@ from pathlib import Path
 
 
 ALLOWED_EXTENSIONS = (".pdf",)
+GMAIL_ALL_MAIL = '"[Gmail]/All Mail"'
 
 
-def _print_folders(mail: imaplib.IMAP4_SSL) -> None:
-    status, folders = mail.list()
-
-    print("=" * 80)
-    print("IMAP FOLDERS")
-    print("=" * 80)
-
-    if status != "OK" or not folders:
-        print(f"Could not list folders: {status} {folders}")
-        print("=" * 80)
-        return
-
-    for raw in folders:
-        print(raw.decode(errors="ignore"))
-
-    print("=" * 80)
+def gmail_raw_query(label: str) -> str:
+    return f'label:{label} is:unread has:attachment'
 
 
 def download_csv_attachments(
@@ -32,7 +19,7 @@ def download_csv_attachments(
     folder: str,
     incoming_dir: Path,
 ) -> list[tuple[str, bytes]]:
-    """Download unread PDF attachments only. Returns [(folder, uid)]."""
+    """Download unread PDF attachments using Gmail X-GM-RAW. Returns [(folder, uid)]."""
 
     touched: list[tuple[str, bytes]] = []
 
@@ -45,29 +32,30 @@ def download_csv_attachments(
     mail = imaplib.IMAP4_SSL(host, port)
     mail.login(user, password)
 
-    _print_folders(mail)
-
-    select_status, select_data = mail.select(f'"{folder}"')
-    print(f"SELECT {folder}: {select_status} {select_data}")
-
-    status, flags = mail.response("PERMANENTFLAGS")
-    print(f"PERMANENTFLAGS {folder}: {status} {flags}")
+    select_status, select_data = mail.select(GMAIL_ALL_MAIL)
+    print(f"SELECT All Mail: {select_status} {select_data}")
 
     if select_status != "OK":
         mail.logout()
         return touched
 
-    status, data = mail.uid("search", None, "UNSEEN")
+    query = gmail_raw_query(folder)
+
+    status, data = mail.uid(
+        "SEARCH",
+        "X-GM-RAW",
+        query,
+    )
+
+    print(f"GMAIL SEARCH QUERY: {query}")
+    print(f"GMAIL SEARCH RESULT: {status} {data}")
 
     if status != "OK":
-        print(f"Email search failed: {status} {data}")
         mail.logout()
         return touched
 
-    print(f"UNSEEN UIDs found: {data}")
-
     for uid in data[0].split():
-        status, msg_data = mail.uid("fetch", uid, "(RFC822)")
+        status, msg_data = mail.uid("FETCH", uid, "(RFC822)")
 
         if status != "OK":
             print(f"Email fetch failed for UID {uid.decode()}: {status}")
@@ -77,7 +65,10 @@ def download_csv_attachments(
         saved_any = False
 
         subject = msg.get("Subject", "")
+        message_id = msg.get("Message-ID", "")
+
         print(f"Reading UID {uid.decode()} | Subject: {subject}")
+        print(f"Message-ID: {message_id}")
 
         for part in msg.walk():
             filename = part.get_filename()
@@ -121,70 +112,52 @@ def delete_messages(
     mail = imaplib.IMAP4_SSL(host, port)
     mail.login(user, password)
 
-    _print_folders(mail)
+    select_status, select_data = mail.select(GMAIL_ALL_MAIL)
+    print(f"SELECT All Mail for cleanup: {select_status} {select_data}")
 
-    by_folder: dict[str, list[bytes]] = {}
+    if select_status != "OK":
+        mail.logout()
+        return
 
     for folder, uid in touched:
-        by_folder.setdefault(folder, []).append(uid)
+        fetch_status, fetch_data = mail.uid(
+            "FETCH",
+            uid,
+            "(X-GM-LABELS FLAGS)",
+        )
+        print(f"Before cleanup UID {uid.decode()}: {fetch_status} {fetch_data}")
 
-    for folder, uids in by_folder.items():
-        select_status, select_data = mail.select(f'"{folder}"')
-        print(f"SELECT {folder} for cleanup: {select_status} {select_data}")
+        # Remove the Gmail label used as the processing inbox.
+        status, response = mail.uid(
+            "STORE",
+            uid,
+            "-X-GM-LABELS",
+            f'"{folder}"',
+        )
 
-        status, flags = mail.response("PERMANENTFLAGS")
-        print(f"PERMANENTFLAGS cleanup {folder}: {status} {flags}")
+        print(
+            f"Remove label {folder} from UID {uid.decode()}: "
+            f"{status} {response}"
+        )
 
-        if select_status != "OK":
-            continue
+        # Mark as read so it is never picked up again by is:unread.
+        seen_status, seen_response = mail.uid(
+            "STORE",
+            uid,
+            "+FLAGS",
+            "\\Seen",
+        )
 
-        for uid in uids:
-            fetch_status, fetch_data = mail.uid(
-                "FETCH",
-                uid,
-                "(X-GM-LABELS FLAGS)"
-            )
-            print(
-                f"Before cleanup UID {uid.decode()}: "
-                f"{fetch_status} {fetch_data}"
-            )
+        print(
+            f"Mark seen UID {uid.decode()}: "
+            f"{seen_status} {seen_response}"
+        )
 
-            status, response = mail.uid(
-                "STORE",
-                uid,
-                "-X-GM-LABELS",
-                f'"{folder}"',
-            )
-
-            print(
-                f"Remove label {folder} from UID {uid.decode()}: "
-                f"{status} {response}"
-            )
-
-            fetch_status, fetch_data = mail.uid(
-                "FETCH",
-                uid,
-                "(X-GM-LABELS FLAGS)"
-            )
-            print(
-                f"After remove label UID {uid.decode()}: "
-                f"{fetch_status} {fetch_data}"
-            )
-
-            if status != "OK":
-                status, response = mail.uid(
-                    "STORE",
-                    uid,
-                    "+FLAGS",
-                    "\\Deleted",
-                )
-
-                print(
-                    f"Fallback delete UID {uid.decode()}: "
-                    f"{status} {response}"
-                )
-
-        status, response = mail.expunge()
-        print(f"EXPUNGE {folder}: {status} {response}")
+        fetch_status, fetch_data = mail.uid(
+            "FETCH",
+            uid,
+            "(X-GM-LABELS FLAGS)",
+        )
+        print(f"After cleanup UID {uid.decode()}: {fetch_status} {fetch_data}")
 
     mail.logout()
