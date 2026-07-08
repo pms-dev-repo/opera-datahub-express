@@ -6,6 +6,7 @@ import re
 import pandas as pd
 
 from .pdf_engine import PdfEngine
+from .pdf_repair import repair_pdf
 
 
 REPORT_NAME = "ODATA_Transportation"
@@ -75,6 +76,24 @@ def to_int(value):
         return int(float(value.replace(",", "")))
     except Exception:
         return None
+
+
+def build_engine(pdf_path: Path) -> tuple[PdfEngine, Path]:
+    try:
+        engine = PdfEngine(pdf_path)
+        engine.group_lines()
+        return engine, pdf_path
+
+    except Exception as exc:
+        print(f"PDF read failed for {pdf_path.name}: {exc}")
+        print(f"Repairing PDF: {pdf_path.name}")
+
+        repaired_path = repair_pdf(pdf_path)
+
+        engine = PdfEngine(repaired_path)
+        engine.group_lines()
+
+        return engine, repaired_path
 
 
 def text_in_range(words: list, x_min: float, x_max: float) -> str:
@@ -165,8 +184,9 @@ def append_continuation(rows: list, words: list, text: str) -> None:
 
 
 def parse_odata_transportation(pdf_path: str | Path) -> pd.DataFrame:
-    pdf_path = Path(pdf_path)
-    engine = PdfEngine(pdf_path)
+    original_pdf_path = Path(pdf_path)
+
+    engine, readable_pdf_path = build_engine(original_pdf_path)
 
     lines_df = engine.group_lines()
 
@@ -204,7 +224,7 @@ def parse_odata_transportation(pdf_path: str | Path) -> pd.DataFrame:
             parsed["transport_direction"] = current_direction
             parsed["transport_type"] = current_transport_type
             parsed["source_report"] = REPORT_NAME
-            parsed["source_file"] = pdf_path.name
+            parsed["source_file"] = original_pdf_path.name
 
             rows.append(parsed)
             continue
@@ -263,19 +283,23 @@ def export_debug(
     pdf_path: str | Path,
     output_path: str | Path = "data/debug/ODATA_Transportation/odata_transportation_debug.xlsx",
 ) -> Path:
-    pdf_path = Path(pdf_path)
+    original_pdf_path = Path(pdf_path)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    engine = PdfEngine(pdf_path)
+    engine, _ = build_engine(original_pdf_path)
 
     words = engine.extract_words()
     lines = engine.group_lines()
-    parsed = parse_odata_transportation(pdf_path)
+    parsed = parse_odata_transportation(original_pdf_path)
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         words.to_excel(writer, sheet_name="raw_words", index=False)
-        lines.drop(columns=["words"], errors="ignore").to_excel(writer, sheet_name="lines", index=False)
+        lines.drop(columns=["words"], errors="ignore").to_excel(
+            writer,
+            sheet_name="lines",
+            index=False,
+        )
         engine.export_line_words(writer)
         parsed.to_excel(writer, sheet_name="parsed_rows", index=False)
 
@@ -283,10 +307,19 @@ def export_debug(
 
 
 if __name__ == "__main__":
-    pdf = Path("data/incoming/ODATA_Transportation.PDF")
+    files = list(Path("data/incoming").glob("ODATA_Transportation*.pdf"))
+    files += list(Path("data/incoming").glob("ODATA_Transportation*.PDF"))
+    files += list(Path("data/incoming").glob("odata_transportation*.pdf"))
+    files += list(Path("data/incoming").glob("odata_transportation*.PDF"))
 
-    if not pdf.exists():
-        raise FileNotFoundError(f"No encontré el PDF aquí: {pdf.resolve()}")
+    if not files:
+        raise FileNotFoundError(
+            "No encontré ningún ODATA_Transportation*.PDF en data/incoming"
+        )
+
+    pdf = files[0]
+
+    print(f"Using: {pdf.name}")
 
     out = export_debug(pdf)
     print(f"Debug exported: {out.resolve()}")
