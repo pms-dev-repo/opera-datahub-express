@@ -30,6 +30,33 @@ def replace_by_dates(engine, table: str, df: pd.DataFrame) -> None:
     print(f"{table}: loaded {len(df)} rows")
 
 
+def enrich_child_buckets_from_snapshot(engine) -> None:
+    with engine.begin() as conn:
+        conn.execute(text("""
+            update odata_arr_detail a
+            set
+                child_bucket_1 = coalesce(s.child_bucket_1, 0),
+                child_bucket_2 = coalesce(s.child_bucket_2, 0),
+                child_bucket_3 = coalesce(s.child_bucket_3, 0)
+            from snapshot s
+            where s.confirmation_number = a.confirmation_no
+              and s.stay_date = a.arrival_date
+        """))
+
+        conn.execute(text("""
+            update odata_departures_all d
+            set
+                child_bucket_1 = coalesce(s.child_bucket_1, 0),
+                child_bucket_2 = coalesce(s.child_bucket_2, 0),
+                child_bucket_3 = coalesce(s.child_bucket_3, 0)
+            from snapshot s
+            where s.room_no = d.room_no
+              and s.stay_date = d.departure_date
+        """))
+
+    print("Child buckets enriched from snapshot.")
+
+
 def log_load(
     engine,
     table_name: str,

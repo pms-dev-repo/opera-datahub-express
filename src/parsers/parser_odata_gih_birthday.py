@@ -12,19 +12,32 @@ REPORT_NAME = "ODATA_GIH_Birthday"
 TARGET_TABLE = "odata_gih_birthday"
 
 DATE_RE = re.compile(r"\d{2}-\d{2}-\d{2}")
+STATUS_VALUES = {"CKIN", "CHECKED IN"}
 
-BIRTHDAY_LINE_RE = re.compile(
-    r"^(?P<guest_name>.+?)\s+"
-    r"(?P<birth_date>\d{2}-\d{2}-\d{2})\s+"
-    r"(?P<age>\d+)\s+"
-    r"(?P<vip>[A-Z]+)\s+"
-    r"(?P<number_of_stays>\d+)"
-    r"(?:\s+(?P<last_stay>\d{2}-\d{2}-\d{2}))?$"
-)
+
+COLUMNS = {
+    "room_no": (0, 40),
+    "guest_name": (40, 230),
+    "company": (230, 360),
+    "arrival_date": (360, 405),
+    "departure_date": (405, 465),
+    "number_of_nights": (465, 475),
+    "rate_code": (475, 535),
+    "reservation_status": (535, 590),
+    "birth_date": (590, 640),
+    "age": (640, 660),
+    "vip": (660, 700),
+    "number_of_stays": (700, 760),
+    "last_stay": (760, 850),
+}
 
 
 def clean_text(value) -> str:
     value = str(value or "").strip()
+
+    if value.startswith("*"):
+        value = value[1:]
+
     value = re.sub(r"\s+", " ", value)
     return value.strip()
 
@@ -32,26 +45,15 @@ def clean_text(value) -> str:
 def to_iso_date(value: str) -> str | None:
     value = clean_text(value)
 
-    if not value:
+    if not value or value.upper() in {"XX/XX/XX", "XX-XX-XX"}:
         return None
 
     try:
         day, month, year = value.split("-")
-
         yy = int(year)
         current_yy = date.today().year % 100
-
-        if yy <= current_yy:
-            yyyy = 2000 + yy
-        else:
-            yyyy = 1900 + yy
-
-        return date(
-            yyyy,
-            int(month),
-            int(day),
-        ).isoformat()
-
+        yyyy = 2000 + yy if yy <= current_yy else 1900 + yy
+        return date(yyyy, int(month), int(day)).isoformat()
     except Exception:
         return None
 
@@ -68,6 +70,21 @@ def to_int(value):
         return None
 
 
+def text_in_range(words: list, x_min: float, x_max: float) -> str:
+    return " ".join(
+        clean_text(w["text"])
+        for w in words
+        if x_min <= float(w["x0"]) < x_max
+    ).strip()
+
+
+def extract_columns(words: list) -> dict:
+    return {
+        col: text_in_range(words, x_min, x_max)
+        for col, (x_min, x_max) in COLUMNS.items()
+    }
+
+
 def is_noise(text: str) -> bool:
     noise = (
         "Sandy Lane",
@@ -79,7 +96,12 @@ def is_noise(text: str) -> bool:
         "Page ",
         "pr_birthday",
         "Room",
-        "Name Company Arr.Date Dep.Date Nts. Resv. Status",
+        "Name",
+        "Company",
+        "Arr.Date",
+        "Dep.Date",
+        "Nts.",
+        "Resv. Status",
         "Birth Date",
         "Age",
         "Vip",
@@ -91,36 +113,31 @@ def is_noise(text: str) -> bool:
         "Rate Code",
     )
 
-    return any(n in text for n in noise)
+    return any(n == text or text.startswith(n) for n in noise)
 
 
-def parse_line(text: str) -> dict | None:
-    text = clean_text(text)
+def looks_like_birthday_row(row: dict) -> bool:
+    return (
+        clean_text(row.get("room_no")).isdigit()
+        and DATE_RE.fullmatch(clean_text(row.get("arrival_date") or "")) is not None
+        and DATE_RE.fullmatch(clean_text(row.get("departure_date") or "")) is not None
+        and clean_text(row.get("reservation_status")) == "CKIN"
+    )
 
-    match = BIRTHDAY_LINE_RE.match(text)
 
-    if not match:
-        return None
+def append_continuation(rows: list[dict], words: list, text: str) -> None:
+    if not rows or not words:
+        return
 
-    data = match.groupdict()
+    min_x = min(float(w["x0"]) for w in words)
 
-    return {
-        "room_no": None,
-        "guest_name": clean_text(data.get("guest_name")),
-        "company": None,
-        "arrival_date": None,
-        "departure_date": None,
-        "number_of_nights": None,
-        "reservation_status": None,
-        "birth_date": data.get("birth_date"),
-        "age": data.get("age"),
-        "vip": data.get("vip"),
-        "number_of_stays": data.get("number_of_stays"),
-        "last_stay": data.get("last_stay"),
-        "source": None,
-        "travel_agent": None,
-        "rate_code": None,
-    }
+    if text.startswith("T- "):
+        rows[-1]["travel_agent"] = clean_text(text)
+        return
+
+    if 210 <= min_x < 360:
+        current = clean_text(rows[-1].get("company"))
+        rows[-1]["company"] = clean_text((current + " " + text).strip())
 
 
 def parse_odata_gih_birthday(pdf_path: str | Path) -> pd.DataFrame:
@@ -133,6 +150,7 @@ def parse_odata_gih_birthday(pdf_path: str | Path) -> pd.DataFrame:
 
     for _, line in lines_df.iterrows():
         text = clean_text(line["text"])
+        words = line["words"]
 
         if not text:
             continue
@@ -140,12 +158,15 @@ def parse_odata_gih_birthday(pdf_path: str | Path) -> pd.DataFrame:
         if is_noise(text):
             continue
 
-        parsed = parse_line(text)
+        parsed = extract_columns(words)
 
-        if parsed:
+        if looks_like_birthday_row(parsed):
             parsed["source_report"] = REPORT_NAME
             parsed["source_file"] = pdf_path.name
             rows.append(parsed)
+            continue
+
+        append_continuation(rows, words, text)
 
     df = pd.DataFrame(rows)
 
@@ -157,7 +178,6 @@ def parse_odata_gih_birthday(pdf_path: str | Path) -> pd.DataFrame:
         "company",
         "reservation_status",
         "vip",
-        "source",
         "travel_agent",
         "rate_code",
     ]:
@@ -171,6 +191,8 @@ def parse_odata_gih_birthday(pdf_path: str | Path) -> pd.DataFrame:
     for col in ["room_no", "number_of_nights", "age", "number_of_stays"]:
         if col in df.columns:
             df[col] = df[col].apply(to_int)
+
+    df["source"] = None
 
     final_columns = [
         "room_no",
@@ -211,7 +233,11 @@ def export_debug(
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         words.to_excel(writer, sheet_name="raw_words", index=False)
-        lines.drop(columns=["words"], errors="ignore").to_excel(writer, sheet_name="lines", index=False)
+        lines.drop(columns=["words"], errors="ignore").to_excel(
+            writer,
+            sheet_name="lines",
+            index=False,
+        )
         engine.export_line_words(writer)
         parsed.to_excel(writer, sheet_name="parsed_rows", index=False)
 
@@ -219,10 +245,19 @@ def export_debug(
 
 
 if __name__ == "__main__":
-    pdf = Path("data/incoming/ODATA_GIH_Birthday.PDF")
+    files = list(Path("data/incoming").glob("ODATA_GIH_Birthday*.pdf"))
+    files += list(Path("data/incoming").glob("ODATA_GIH_Birthday*.PDF"))
+    files += list(Path("data/incoming").glob("odata_gih_birthday*.pdf"))
+    files += list(Path("data/incoming").glob("odata_gih_birthday*.PDF"))
 
-    if not pdf.exists():
-        raise FileNotFoundError(f"No encontré el PDF aquí: {pdf.resolve()}")
+    if not files:
+        raise FileNotFoundError(
+            "No encontré ningún ODATA_GIH_Birthday*.PDF en data/incoming"
+        )
+
+    pdf = files[0]
+
+    print(f"Using: {pdf.name}")
 
     out = export_debug(pdf)
     print(f"Debug exported: {out.resolve()}")

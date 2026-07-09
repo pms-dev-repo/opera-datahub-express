@@ -18,7 +18,10 @@ ROW_RE = re.compile(
     r"(?P<child_bucket_3>\d+)\s+"
     r"(?:(?P<reservation_status>[A-Z ]+?)\s+)?"
     r"(?:(?P<confirmation_number>\d{6,})\s+)?"
-    r"(?P<stay_date>\d{1,2}/\d{1,2}/\d{4})$"
+    r"(?P<stay_date>\d{1,2}/\d{1,2}/\d{4})\s+"
+    r"(?P<room_type>[A-Z0-9]+)\s+"
+    r"(?P<room_no>\d+)"
+    r"(?:\s+(?P<children_ages>[0-9\-]+))?$"
 )
 
 
@@ -32,6 +35,7 @@ def to_int(value):
     value = clean_text(value)
     if not value:
         return None
+
     try:
         return int(float(value.replace(",", "")))
     except Exception:
@@ -54,9 +58,12 @@ def is_noise(text: str) -> bool:
         not text
         or text.lower() == "snapshot"
         or text.startswith("Adults Children")
+        or text.startswith("Child Bucket")
         or text.startswith("Reservation Status")
         or text.startswith("Confirmation Number")
         or text.startswith("Stay Date")
+        or text.startswith("Room Type")
+        or text.startswith("Room Children")
     )
 
 
@@ -78,6 +85,9 @@ def parse_line(text: str) -> dict | None:
         "reservation_status": clean_text(data.get("reservation_status")),
         "confirmation_number": data.get("confirmation_number"),
         "stay_date": data.get("stay_date"),
+        "room_type": clean_text(data.get("room_type")),
+        "room_no": data.get("room_no"),
+        "children_ages": clean_text(data.get("children_ages")),
     }
 
 
@@ -147,11 +157,19 @@ def parse_snapshot(pdf_path: str | Path) -> pd.DataFrame:
         "child_bucket_2",
         "child_bucket_3",
         "confirmation_number",
+        "room_no",
     ]:
         if col in df.columns:
             df[col] = df[col].apply(to_int)
 
-    df["reservation_status"] = df["reservation_status"].apply(clean_text)
+    for col in [
+        "reservation_status",
+        "room_type",
+        "children_ages",
+    ]:
+        if col in df.columns:
+            df[col] = df[col].apply(clean_text)
+
     df["stay_date"] = df["stay_date"].apply(to_iso_date)
 
     final_columns = [
@@ -163,6 +181,9 @@ def parse_snapshot(pdf_path: str | Path) -> pd.DataFrame:
         "child_bucket_1",
         "child_bucket_2",
         "child_bucket_3",
+        "room_type",
+        "room_no",
+        "children_ages",
         "source_report",
         "source_file",
     ]

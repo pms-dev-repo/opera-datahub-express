@@ -14,6 +14,7 @@ from .db import (
     get_engine,
     replace_by_dates,
     log_load,
+    enrich_child_buckets_from_snapshot,
 )
 from .processors.core import process_file
 
@@ -111,6 +112,9 @@ def run() -> None:
                 pass
 
             move_file(path, settings.ERROR_DIR)
+
+    if ok:
+        enrich_child_buckets_from_snapshot(engine)
 
     if ok and settings.EMAIL_DELETE_AFTER_SUCCESS and touched_messages:
         delete_messages(
