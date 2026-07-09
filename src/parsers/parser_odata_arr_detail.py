@@ -16,22 +16,45 @@ ROOM_LINE_RE = re.compile(r"^\d{2,5}\s+")
 DETAIL_LINE_RE = re.compile(r"^\d{6,}\s+")
 
 
+def clean_text(value) -> str:
+    value = str(value or "").strip()
+
+    if value.startswith("*"):
+        value = value[1:]
+
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
+
+
+def clean_guest_name(value: str) -> str:
+    value = clean_text(value)
+
+    # Remove Company / Travel Agent / Group text attached to guest name.
+    value = re.split(r"\s+[CTG]-", value)[0]
+
+    return value.strip()
+
+
 def to_iso_date(value: str) -> str | None:
-    if value is None or str(value).strip() == "":
+    value = clean_text(value)
+
+    if not value:
         return None
 
     try:
-        return datetime.strptime(str(value).strip(), "%d-%m-%y").date().isoformat()
+        return datetime.strptime(value, "%d-%m-%y").date().isoformat()
     except Exception:
         return None
 
 
 def to_int(value):
-    if value is None or str(value).strip() == "":
+    value = clean_text(value)
+
+    if not value:
         return None
 
     try:
-        return int(float(str(value).strip()))
+        return int(float(value.replace(",", "")))
     except Exception:
         return None
 
@@ -68,6 +91,7 @@ def is_noise(text: str) -> bool:
 
 
 def parse_main_line(text: str) -> dict:
+    text = clean_text(text)
     dates = DATE_RE.findall(text)
 
     if len(dates) < 2:
@@ -83,15 +107,7 @@ def parse_main_line(text: str) -> dict:
     room_no = before_tokens[0] if before_tokens else ""
 
     name_company = " ".join(before_tokens[1:]).strip()
-
-    company_markers = [" S- ", " T- "]
-    guest_name = name_company
-
-    for marker in company_markers:
-        if marker in f" {name_company} ":
-            parts = f" {name_company} ".split(marker, 1)
-            guest_name = parts[0].strip()
-            break
+    guest_name = clean_guest_name(name_company)
 
     tail = after_departure.split()
 
@@ -110,6 +126,7 @@ def parse_main_line(text: str) -> dict:
 
 
 def parse_detail_line(text: str) -> dict:
+    text = clean_text(text)
     tokens = text.split()
 
     confirmation_no = tokens[0] if len(tokens) > 0 else ""
@@ -157,7 +174,7 @@ def parse_odata_arr_detail(pdf_path: str | Path) -> pd.DataFrame:
     current_arrival_group = ""
 
     for _, row in lines_df.iterrows():
-        text = str(row["text"]).strip()
+        text = clean_text(row["text"])
 
         if not text or is_noise(text):
             continue
@@ -170,12 +187,16 @@ def parse_odata_arr_detail(pdf_path: str | Path) -> pd.DataFrame:
 
         if text.startswith("Share with:"):
             if rows:
-                rows[-1]["share_with"] = text.replace("Share with:", "").strip()
+                rows[-1]["share_with"] = clean_text(
+                    text.replace("Share with:", "")
+                )
             continue
 
         if text.startswith("Accompanying Names:"):
             if rows:
-                rows[-1]["accompanying_names"] = text.replace("Accompanying Names:", "").strip()
+                rows[-1]["accompanying_names"] = clean_text(
+                    text.replace("Accompanying Names:", "")
+                )
             continue
 
         if ROOM_LINE_RE.match(text) and DATE_RE.search(text):
@@ -205,6 +226,23 @@ def parse_odata_arr_detail(pdf_path: str | Path) -> pd.DataFrame:
 
     df = df[df["confirmation_no"].astype(str).str.match(r"^\d{6,}$", na=False)]
     df = df.drop_duplicates(subset=["confirmation_no", "guest_name"], keep="first")
+
+    if "guest_name" in df.columns:
+        df["guest_name"] = df["guest_name"].apply(clean_guest_name)
+
+    for col in [
+        "room_type",
+        "market_code",
+        "reservation_status",
+        "vip",
+        "last_room",
+        "carrier_code",
+        "method_of_arrival",
+        "share_with",
+        "accompanying_names",
+    ]:
+        if col in df.columns:
+            df[col] = df[col].apply(clean_text)
 
     for col in ["arrival_date", "departure_date", "arrival_group_date"]:
         if col in df.columns:
@@ -249,9 +287,7 @@ def parse_odata_arr_detail(pdf_path: str | Path) -> pd.DataFrame:
         "source_file",
     ]
 
-    df = df[[c for c in final_columns if c in df.columns]]
-
-    return df
+    return df[[c for c in final_columns if c in df.columns]]
 
 
 def export_debug(
@@ -270,7 +306,11 @@ def export_debug(
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         words.to_excel(writer, sheet_name="raw_words", index=False)
-        lines.drop(columns=["words"], errors="ignore").to_excel(writer, sheet_name="lines", index=False)
+        lines.drop(columns=["words"], errors="ignore").to_excel(
+            writer,
+            sheet_name="lines",
+            index=False,
+        )
         engine.export_line_words(writer)
         parsed.to_excel(writer, sheet_name="parsed_rows", index=False)
 
@@ -278,10 +318,19 @@ def export_debug(
 
 
 if __name__ == "__main__":
-    pdf = Path("data/incoming/ODATA_arr_detail.PDF")
+    files = list(Path("data/incoming").glob("ODATA_arr_detail*.pdf"))
+    files += list(Path("data/incoming").glob("ODATA_arr_detail*.PDF"))
+    files += list(Path("data/incoming").glob("odata_arr_detail*.pdf"))
+    files += list(Path("data/incoming").glob("odata_arr_detail*.PDF"))
 
-    if not pdf.exists():
-        raise FileNotFoundError(f"No encontré el PDF aquí: {pdf.resolve()}")
+    if not files:
+        raise FileNotFoundError(
+            "No encontré ningún ODATA_arr_detail*.PDF en data/incoming"
+        )
+
+    pdf = files[0]
+
+    print(f"Using: {pdf.name}")
 
     out = export_debug(pdf)
     print(f"Debug exported: {out.resolve()}")

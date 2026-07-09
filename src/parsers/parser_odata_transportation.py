@@ -41,12 +41,23 @@ COLUMNS = {
 def clean_text(value) -> str:
     value = str(value or "").strip()
     value = value.replace("\ufffe", "")
+
+    if value.startswith("*"):
+        value = value[1:]
+
     value = re.sub(r"\s+", " ", value)
+    return value.strip()
+
+
+def clean_guest_name(value: str) -> str:
+    value = clean_text(value)
+    value = re.split(r"\s+[CTG]-", value)[0]
     return value.strip()
 
 
 def to_iso_date(value: str) -> str | None:
     value = clean_text(value)
+
     if not value:
         return None
 
@@ -58,6 +69,7 @@ def to_iso_date(value: str) -> str | None:
 
 def to_iso_datetime(value: str) -> str | None:
     value = clean_text(value)
+
     if not value:
         return None
 
@@ -69,6 +81,7 @@ def to_iso_datetime(value: str) -> str | None:
 
 def to_int(value):
     value = clean_text(value)
+
     if not value:
         return None
 
@@ -186,7 +199,7 @@ def append_continuation(rows: list, words: list, text: str) -> None:
 def parse_odata_transportation(pdf_path: str | Path) -> pd.DataFrame:
     original_pdf_path = Path(pdf_path)
 
-    engine, readable_pdf_path = build_engine(original_pdf_path)
+    engine, _ = build_engine(original_pdf_path)
 
     lines_df = engine.group_lines()
 
@@ -236,8 +249,10 @@ def parse_odata_transportation(pdf_path: str | Path) -> pd.DataFrame:
     if df.empty:
         return df
 
+    if "guest_name" in df.columns:
+        df["guest_name"] = df["guest_name"].apply(clean_guest_name)
+
     for col in [
-        "guest_name",
         "station_code",
         "carrier_code",
         "transport_code",

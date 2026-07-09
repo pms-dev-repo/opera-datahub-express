@@ -12,13 +12,12 @@ REPORT_NAME = "ODATA_GIH_Birthday"
 TARGET_TABLE = "odata_gih_birthday"
 
 DATE_RE = re.compile(r"\d{2}-\d{2}-\d{2}")
-STATUS_VALUES = {"CKIN", "CHECKED IN"}
 
 
 COLUMNS = {
     "room_no": (0, 40),
-    "guest_name": (40, 230),
-    "company": (230, 360),
+    "guest_name": (40, 190),
+    "company": (190, 360),
     "arrival_date": (360, 405),
     "departure_date": (405, 465),
     "number_of_nights": (465, 475),
@@ -39,6 +38,15 @@ def clean_text(value) -> str:
         value = value[1:]
 
     value = re.sub(r"\s+", " ", value)
+    return value.strip()
+
+
+def clean_guest_name(value: str) -> str:
+    value = clean_text(value)
+
+    # Corta cualquier dato de Company / Travel Agent / Group pegado al nombre.
+    value = re.split(r"\s+[CTG]-", value)[0]
+
     return value.strip()
 
 
@@ -121,7 +129,7 @@ def looks_like_birthday_row(row: dict) -> bool:
         clean_text(row.get("room_no")).isdigit()
         and DATE_RE.fullmatch(clean_text(row.get("arrival_date") or "")) is not None
         and DATE_RE.fullmatch(clean_text(row.get("departure_date") or "")) is not None
-        and clean_text(row.get("reservation_status")) == "CKIN"
+        and clean_text(row.get("reservation_status")) in {"CKIN", "CHECKED IN"}
     )
 
 
@@ -129,13 +137,19 @@ def append_continuation(rows: list[dict], words: list, text: str) -> None:
     if not rows or not words:
         return
 
+    text = clean_text(text)
     min_x = min(float(w["x0"]) for w in words)
 
     if text.startswith("T- "):
-        rows[-1]["travel_agent"] = clean_text(text)
+        rows[-1]["travel_agent"] = text
         return
 
-    if 210 <= min_x < 360:
+    if text.startswith("C- ") or text.startswith("G- "):
+        current = clean_text(rows[-1].get("company"))
+        rows[-1]["company"] = clean_text((current + " " + text).strip())
+        return
+
+    if 190 <= min_x < 360:
         current = clean_text(rows[-1].get("company"))
         rows[-1]["company"] = clean_text((current + " " + text).strip())
 
@@ -145,7 +159,6 @@ def parse_odata_gih_birthday(pdf_path: str | Path) -> pd.DataFrame:
     engine = PdfEngine(pdf_path)
 
     lines_df = engine.group_lines()
-
     rows = []
 
     for _, line in lines_df.iterrows():
@@ -173,8 +186,10 @@ def parse_odata_gih_birthday(pdf_path: str | Path) -> pd.DataFrame:
     if df.empty:
         return df
 
+    if "guest_name" in df.columns:
+        df["guest_name"] = df["guest_name"].apply(clean_guest_name)
+
     for col in [
-        "guest_name",
         "company",
         "reservation_status",
         "vip",

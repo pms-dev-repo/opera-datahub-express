@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from datetime import datetime
+from datetime import date
 import re
 import pandas as pd
 
@@ -15,71 +15,75 @@ DATE_RE = re.compile(r"\d{2}-\d{2}-\d{2}")
 
 
 COLUMNS = {
-    "room_no": (0, 30),
-    "guest_name": (30, 120),
-    "vip": (275, 305),
-    "arrival_date": (300, 345),
-    "departure_date": (345, 390),
-    "adults": (390, 410),
-    "children": (410, 430),
-    "rooms": (430, 455),
-    "nights": (455, 475),
-    "room_type": (475, 500),
-    "rate_code": (535, 575),
-    "reservation_status": (575, 610),
-    "departure_time": (610, 640),
-    "payment_method": (640, 675),
+    "room_no": (0, 35),
+    "guest_name": (35, 122),
+    "company": (122, 282),
+    "vip": (282, 309),
+    "arrival_date": (309, 348),
+    "departure_date": (348, 391),
+    "adults": (391, 411),
+    "children": (411, 430),
+    "rooms": (430, 458),
+    "nights": (458, 475),
+    "room_type": (475, 505),
+    "rate_code": (538, 575),
+    "reservation_status": (575, 640),
+    "payment_method": (640, 690),
 }
 
 
+def clean_text(value) -> str:
+    value = str(value or "").strip()
+
+    if value.startswith("*"):
+        value = value[1:]
+
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
+
+
+def clean_guest_name(value: str) -> str:
+    value = clean_text(value)
+
+    value = re.split(r"\s+[CTG]-", value)[0]
+    value = re.sub(r"\bMaste r\b", "Master", value)
+    value = re.sub(r"\bMr \.", "Mr.", value)
+    value = re.sub(r"\bMrs \.", "Mrs.", value)
+
+    return value.strip()
+
+
 def to_iso_date(value: str) -> str | None:
-    if value is None or str(value).strip() == "":
+    value = clean_text(value)
+
+    if not value:
         return None
+
     try:
-        return datetime.strptime(str(value).strip(), "%d-%m-%y").date().isoformat()
+        day, month, year = value.split("-")
+        yy = int(year)
+        current_yy = date.today().year % 100
+        yyyy = 2000 + yy if yy <= current_yy else 1900 + yy
+        return date(yyyy, int(month), int(day)).isoformat()
     except Exception:
         return None
 
 
 def to_int(value):
-    if value is None or str(value).strip() == "":
+    value = clean_text(value)
+
+    if not value:
         return None
+
     try:
-        return int(float(str(value).replace(",", "").strip()))
+        return int(float(value.replace(",", "")))
     except Exception:
         return None
 
 
-def is_noise(text: str) -> bool:
-    noise = (
-        "Filter ",
-        "Room Class",
-        "Sort Order",
-        "Profile Type",
-        "Sandy Lane",
-        "ODATA_Departures_All",
-        "departure_all",
-        "Page ",
-        "Name",
-        "Company",
-        "Travel Agent",
-        "Source",
-        "Group",
-        "Room Room",
-        "No.",
-        "Rate",
-        "Code",
-        "VIP",
-        "Total ",
-        "Departure",
-        "Date Date",
-    )
-    return any(n in text for n in noise)
-
-
 def text_in_range(words: list, x_min: float, x_max: float) -> str:
     return " ".join(
-        str(w["text"])
+        clean_text(w["text"])
         for w in words
         if x_min <= float(w["x0"]) < x_max
     ).strip()
@@ -92,26 +96,67 @@ def extract_columns(words: list) -> dict:
     }
 
 
-def clean_guest_name(value: str) -> str:
-    value = str(value or "").strip()
-    value = value.replace(" ,", ",")
-    value = value.replace(" .", ".")
-    value = value.replace("Ms .", "Ms.")
-    value = value.replace("Mr .", "Mr.")
-    value = value.replace("Mrs .", "Mrs.")
-    value = re.sub(r"\s+", " ", value)
-    return value.strip()
+def is_noise(text: str) -> bool:
+    noise = (
+        "Sandy Lane",
+        "ODATA_Departures_All",
+        "Filter ",
+        "Reservation Status",
+        "Sort Order",
+        "Page ",
+        "Room Name",
+        "No. Travel",
+        "Source",
+        "Group",
+        "Total ",
+    )
+
+    return any(n == text or text.startswith(n) for n in noise)
 
 
-def split_rate_status(row: dict) -> dict:
-    rate = str(row.get("rate_code") or "").strip()
-    status = str(row.get("reservation_status") or "").strip()
+def get_departure_group_date(text: str) -> str | None:
+    text = clean_text(text)
 
-    if rate.endswith("CKIN") and not status:
-        row["rate_code"] = rate.replace("CKIN", "")
-        row["reservation_status"] = "CKIN"
+    if text.startswith("Departure "):
+        value = text.replace("Departure ", "").strip()
 
-    return row
+        if DATE_RE.fullmatch(value):
+            return value
+
+    return None
+
+
+def looks_like_departure_row(row: dict) -> bool:
+    return (
+        clean_text(row.get("room_no")).isdigit()
+        and clean_text(row.get("guest_name"))
+        and DATE_RE.fullmatch(clean_text(row.get("arrival_date") or "")) is not None
+        and DATE_RE.fullmatch(clean_text(row.get("departure_date") or "")) is not None
+    )
+
+
+def append_continuation(rows: list[dict], words: list, text: str) -> None:
+    if not rows or not words:
+        return
+
+    text = clean_text(text)
+
+    if text.startswith("Share with:"):
+        rows[-1]["share_with"] = clean_text(
+            str(rows[-1].get("share_with") or "") + " " + text.replace("Share with:", "")
+        )
+        return
+
+    guest_part = text_in_range(words, 35, 122)
+    company_part = text_in_range(words, 122, 282)
+
+    if guest_part:
+        current = clean_text(rows[-1].get("guest_name"))
+        rows[-1]["guest_name"] = clean_text((current + " " + guest_part).strip())
+
+    if company_part:
+        current = clean_text(rows[-1].get("company"))
+        rows[-1]["company"] = clean_text((current + " " + company_part).strip())
 
 
 def parse_odata_departures_all(pdf_path: str | Path) -> pd.DataFrame:
@@ -119,79 +164,74 @@ def parse_odata_departures_all(pdf_path: str | Path) -> pd.DataFrame:
     engine = PdfEngine(pdf_path)
 
     lines_df = engine.group_lines()
-
     rows = []
-    current_departure_group = None
-    last_row_index = None
+
+    current_departure_group_date = None
 
     for _, line in lines_df.iterrows():
-        text = str(line["text"]).strip()
+        text = clean_text(line["text"])
         words = line["words"]
 
         if not text:
             continue
 
-        if text.startswith("Share with:"):
-            if last_row_index is not None:
-                rows[last_row_index]["share_with"] = text.replace("Share with:", "").strip()
+        group_date = get_departure_group_date(text)
+        if group_date:
+            current_departure_group_date = group_date
             continue
 
         if is_noise(text):
             continue
 
-        if text.startswith("Departure"):
-            dates = DATE_RE.findall(text)
-            if dates:
-                current_departure_group = dates[-1]
-            continue
-
-        if DATE_RE.fullmatch(text):
-            current_departure_group = text
-            continue
-
         parsed = extract_columns(words)
 
-        room_no = str(parsed.get("room_no") or "").strip()
-        arrival_date = str(parsed.get("arrival_date") or "").strip()
-
-        is_main_row = (
-            room_no.isdigit()
-            and DATE_RE.fullmatch(arrival_date) is not None
-        )
-
-        if is_main_row:
-            parsed = split_rate_status(parsed)
-
-            parsed["guest_name"] = clean_guest_name(parsed.get("guest_name"))
-            parsed["departure_group_date"] = current_departure_group
-            parsed["share_with"] = ""
+        if looks_like_departure_row(parsed):
+            parsed["departure_group_date"] = current_departure_group_date
+            parsed["departure_time"] = None
+            parsed["share_with"] = None
             parsed["source_report"] = REPORT_NAME
             parsed["source_file"] = pdf_path.name
-
             rows.append(parsed)
-            last_row_index = len(rows) - 1
             continue
 
-        # Continuación de nombre, ejemplo: "& Mrs." o "."
-        if last_row_index is not None:
-            continuation = text.strip()
-            min_x = min(float(w["x0"]) for w in words)
-
-            if min_x < 80 and continuation not in ("",):
-                rows[last_row_index]["guest_name"] = clean_guest_name(
-                    rows[last_row_index]["guest_name"] + " " + continuation
-                )
+        append_continuation(rows, words, text)
 
     df = pd.DataFrame(rows)
 
     if df.empty:
         return df
 
-    for col in ["arrival_date", "departure_date", "departure_group_date"]:
+    if "guest_name" in df.columns:
+        df["guest_name"] = df["guest_name"].apply(clean_guest_name)
+
+    for col in [
+        "company",
+        "room_type",
+        "reservation_status",
+        "departure_time",
+        "payment_method",
+        "rate_code",
+        "vip",
+        "share_with",
+    ]:
+        if col in df.columns:
+            df[col] = df[col].apply(clean_text)
+
+    for col in [
+        "arrival_date",
+        "departure_date",
+        "departure_group_date",
+    ]:
         if col in df.columns:
             df[col] = df[col].apply(to_iso_date)
 
-    for col in ["room_no", "nights", "adults", "children", "rooms"]:
+    for col in [
+        "room_no",
+        "nights",
+        "adults",
+        "children",
+        "rooms",
+    ]:
         if col in df.columns:
             df[col] = df[col].apply(to_int)
 
@@ -235,7 +275,11 @@ def export_debug(
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         words.to_excel(writer, sheet_name="raw_words", index=False)
-        lines.drop(columns=["words"], errors="ignore").to_excel(writer, sheet_name="lines", index=False)
+        lines.drop(columns=["words"], errors="ignore").to_excel(
+            writer,
+            sheet_name="lines",
+            index=False,
+        )
         engine.export_line_words(writer)
         parsed.to_excel(writer, sheet_name="parsed_rows", index=False)
 
@@ -243,10 +287,19 @@ def export_debug(
 
 
 if __name__ == "__main__":
-    pdf = Path("data/incoming/ODATA_Departures_All.PDF")
+    files = list(Path("data/incoming").glob("ODATA_Departures_All*.pdf"))
+    files += list(Path("data/incoming").glob("ODATA_Departures_All*.PDF"))
+    files += list(Path("data/incoming").glob("odata_departures_all*.pdf"))
+    files += list(Path("data/incoming").glob("odata_departures_all*.PDF"))
 
-    if not pdf.exists():
-        raise FileNotFoundError(f"No encontré el PDF aquí: {pdf.resolve()}")
+    if not files:
+        raise FileNotFoundError(
+            "No encontré ningún ODATA_Departures_All*.PDF en data/incoming"
+        )
+
+    pdf = files[0]
+
+    print(f"Using: {pdf.name}")
 
     out = export_debug(pdf)
     print(f"Debug exported: {out.resolve()}")
