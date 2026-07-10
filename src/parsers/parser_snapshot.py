@@ -18,6 +18,7 @@ ROW_RE = re.compile(
     r"(?P<child_bucket_3>\d+)\s+"
     r"(?:(?P<reservation_status>[A-Z ]+?)\s+)?"
     r"(?:(?P<confirmation_number>\d{6,})\s+)?"
+    r"(?P<source_code>\S+)\s+"
     r"(?P<stay_date>\d{1,2}/\d{1,2}/\d{4})\s+"
     r"(?P<room_type>[A-Z0-9]+)\s+"
     r"(?P<room_no>\d+)"
@@ -84,6 +85,7 @@ def parse_line(text: str) -> dict | None:
         "child_bucket_3": data.get("child_bucket_3"),
         "reservation_status": clean_text(data.get("reservation_status")),
         "confirmation_number": data.get("confirmation_number"),
+        "source_code": data.get("source_code"),
         "stay_date": data.get("stay_date"),
         "room_type": clean_text(data.get("room_type")),
         "room_no": data.get("room_no"),
@@ -184,6 +186,7 @@ def parse_snapshot(pdf_path: str | Path) -> pd.DataFrame:
         "room_type",
         "room_no",
         "children_ages",
+        "source_code",
         "source_report",
         "source_file",
     ]
