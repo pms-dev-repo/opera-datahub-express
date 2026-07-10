@@ -9,7 +9,6 @@ from pathlib import Path
 
 ALLOWED_EXTENSIONS = (".pdf",)
 
-# Reportes permitidos en la búsqueda de respaldo.
 ALLOWED_SUBJECT_MARKERS = (
     "snapshot",
     "odata_",
@@ -32,32 +31,17 @@ def decode_mime_text(value) -> str:
         return str(value)
 
 
-def quote_gmail_value(value: str) -> str:
-    """
-    Escapa un valor para utilizarlo en una búsqueda X-GM-RAW.
-
-    Ejemplo:
-        SLANE             -> "SLANE"
-        Opera Reports     -> "Opera Reports"
-    """
-    value = clean_text(value)
-    value = value.replace("\\", "\\\\")
-    value = value.replace('"', '\\"')
-
-    return f'"{value}"'
-
-
 def gmail_raw_query(label: str) -> str:
     """
-    Búsqueda principal por etiqueta.
+    Consulta principal por etiqueta Gmail.
 
-    Las comillas permiten trabajar también con etiquetas que contienen
-    espacios o caracteres especiales.
+    No agrega comillas internas para evitar que IMAP genere:
+    BAD Could not parse command
     """
-    quoted_label = quote_gmail_value(label)
+    label = clean_text(label)
 
     return (
-        f"label:{quoted_label} "
+        f"label:{label} "
         f"is:unread "
         f"has:attachment"
     )
@@ -65,24 +49,19 @@ def gmail_raw_query(label: str) -> str:
 
 def gmail_fallback_query() -> str:
     """
-    Búsqueda de respaldo.
-
-    Busca correos no leídos con adjuntos cuyo asunto corresponda
-    a los reportes del DataHub.
+    Consulta de respaldo cuando Gmail no encuentra mensajes
+    mediante la etiqueta configurada.
     """
-    subject_conditions = " ".join(
-        f"subject:{quote_gmail_value(marker)}"
-        for marker in ALLOWED_SUBJECT_MARKERS
-    )
-
     return (
-        f"is:unread "
-        f"has:attachment "
-        f"{{{subject_conditions}}}"
+        "is:unread "
+        "has:attachment "
+        "{subject:snapshot subject:odata_}"
     )
 
 
-def get_all_mail_folder(mail: imaplib.IMAP4_SSL) -> str:
+def get_all_mail_folder(
+    mail: imaplib.IMAP4_SSL,
+) -> str:
     status, folders = mail.list()
 
     if status != "OK" or not folders:
@@ -92,8 +71,7 @@ def get_all_mail_folder(mail: imaplib.IMAP4_SSL) -> str:
         line = raw.decode(errors="ignore")
 
         if "\\All" in line:
-            mailbox = line.split(' "/" ')[-1]
-            return mailbox
+            return line.split(' "/" ')[-1]
 
     return '"INBOX"'
 
@@ -103,9 +81,13 @@ def search_messages(
     query: str,
 ) -> list[bytes]:
     """
-    Ejecuta una búsqueda Gmail X-GM-RAW y devuelve números
-    de secuencia IMAP.
+    Ejecuta Gmail X-GM-RAW.
+
+    La consulta completa se envía como un solo argumento IMAP.
     """
+
+    print(f"GMAIL SEARCH QUERY: {query}")
+
     try:
         status, data = mail.search(
             None,
@@ -117,10 +99,13 @@ def search_messages(
         print(f"Gmail search command failed: {exc}")
         return []
 
-    print(f"GMAIL SEARCH QUERY: {query}")
     print(f"GMAIL SEARCH RESULT: {status} {data}")
 
-    if status != "OK" or not data:
+    if (
+        status != "OK"
+        or not data
+        or not data[0]
+    ):
         return []
 
     return data[0].split()
@@ -147,9 +132,14 @@ def get_uid_from_sequence(
     if not isinstance(raw_response, bytes):
         return None
 
-    uid_text = raw_response.decode(errors="ignore")
+    uid_text = raw_response.decode(
+        errors="ignore"
+    )
 
-    match = re.search(r"\bUID\s+(\d+)", uid_text)
+    match = re.search(
+        r"\bUID\s+(\d+)",
+        uid_text,
+    )
 
     if not match:
         print(
@@ -162,16 +152,50 @@ def get_uid_from_sequence(
     return match.group(1).encode()
 
 
-def subject_is_allowed(subject: str) -> bool:
-    """
-    Protección para que la búsqueda de respaldo no descargue
-    cualquier PDF personal no leído.
-    """
-    subject_lower = clean_text(subject).lower()
+def subject_is_allowed(
+    subject: str,
+) -> bool:
+    subject_lower = clean_text(
+        subject
+    ).lower()
 
     return any(
         marker.lower() in subject_lower
         for marker in ALLOWED_SUBJECT_MARKERS
+    )
+
+
+def extract_rfc822_payload(
+    msg_data,
+) -> bytes | None:
+    if not msg_data:
+        return None
+
+    for item in msg_data:
+        if (
+            isinstance(item, tuple)
+            and len(item) >= 2
+            and isinstance(item[1], bytes)
+        ):
+            return item[1]
+
+    return None
+
+
+def unique_output_path(
+    incoming_dir: Path,
+    filename: str,
+    uid: bytes,
+) -> Path:
+    safe_name = Path(filename).name
+    out_path = incoming_dir / safe_name
+
+    if not out_path.exists():
+        return out_path
+
+    return incoming_dir / (
+        f"{out_path.stem}_{uid.decode()}"
+        f"{out_path.suffix}"
     )
 
 
@@ -184,14 +208,15 @@ def download_csv_attachments(
     incoming_dir: Path,
 ) -> list[tuple[str, bytes]]:
     """
-    Descarga adjuntos PDF no leídos.
+    Descarga archivos PDF no leídos.
 
     Primero busca por la etiqueta configurada.
-    Si no encuentra mensajes, utiliza una búsqueda de respaldo
-    por asunto: snapshot u ODATA_.
+
+    Si no encuentra correos, usa una búsqueda de respaldo
+    basada en los asuntos snapshot y ODATA_.
 
     Returns:
-        [(folder, uid)]
+        list[(folder, uid)]
     """
 
     touched: list[tuple[str, bytes]] = []
@@ -220,9 +245,15 @@ def download_csv_attachments(
         )
 
         all_mail = get_all_mail_folder(mail)
-        print(f"Using mailbox: {all_mail}")
 
-        select_status, select_data = mail.select(all_mail)
+        print(
+            f"Using mailbox: {all_mail}"
+        )
+
+        select_status, select_data = mail.select(
+            all_mail
+        )
+
         print(
             f"SELECT All Mail: "
             f"{select_status} {select_data}"
@@ -231,7 +262,10 @@ def download_csv_attachments(
         if select_status != "OK":
             return touched
 
-        primary_query = gmail_raw_query(folder)
+        primary_query = gmail_raw_query(
+            folder
+        )
+
         message_ids = search_messages(
             mail,
             primary_query,
@@ -246,6 +280,7 @@ def download_csv_attachments(
             )
 
             fallback_query = gmail_fallback_query()
+
             message_ids = search_messages(
                 mail,
                 fallback_query,
@@ -273,23 +308,16 @@ def download_csv_attachments(
                 "(RFC822)",
             )
 
-            if status != "OK" or not msg_data:
+            if status != "OK":
                 print(
                     f"Email fetch failed for UID "
                     f"{uid.decode()}: {status}"
                 )
                 continue
 
-            raw_message = None
-
-            for item in msg_data:
-                if (
-                    isinstance(item, tuple)
-                    and len(item) >= 2
-                    and isinstance(item[1], bytes)
-                ):
-                    raw_message = item[1]
-                    break
+            raw_message = extract_rfc822_payload(
+                msg_data
+            )
 
             if not raw_message:
                 print(
@@ -314,13 +342,18 @@ def download_csv_attachments(
                 f"Reading UID {uid.decode()} "
                 f"| Subject: {subject}"
             )
-            print(f"Message-ID: {message_id}")
 
-            # La búsqueda secundaria podría encontrar otros PDFs.
-            # Solo aceptamos asuntos relacionados con el DataHub.
-            if used_fallback and not subject_is_allowed(subject):
+            print(
+                f"Message-ID: {message_id}"
+            )
+
+            if (
+                used_fallback
+                and not subject_is_allowed(subject)
+            ):
                 print(
-                    f"Skipped by subject filter: {subject}"
+                    f"Skipped by subject filter: "
+                    f"{subject}"
                 )
                 continue
 
@@ -332,8 +365,13 @@ def download_csv_attachments(
                 if not filename:
                     continue
 
-                filename = decode_mime_text(filename)
-                safe_name = Path(filename).name
+                filename = decode_mime_text(
+                    filename
+                )
+
+                safe_name = Path(
+                    filename
+                ).name
 
                 if not safe_name.lower().endswith(
                     ALLOWED_EXTENSIONS
@@ -346,21 +384,20 @@ def download_csv_attachments(
 
                 if not payload:
                     print(
-                        f"Attachment empty: {safe_name}"
+                        f"Attachment empty: "
+                        f"{safe_name}"
                     )
                     continue
 
-                out_path = incoming_dir / safe_name
+                out_path = unique_output_path(
+                    incoming_dir,
+                    safe_name,
+                    uid,
+                )
 
-                # Evita sobrescribir otro archivo ya descargado
-                # con el mismo nombre.
-                if out_path.exists():
-                    out_path = incoming_dir / (
-                        f"{out_path.stem}_{uid.decode()}"
-                        f"{out_path.suffix}"
-                    )
-
-                out_path.write_bytes(payload)
+                out_path.write_bytes(
+                    payload
+                )
 
                 print(
                     f"Downloaded: {out_path} "
@@ -393,12 +430,8 @@ def delete_messages(
     """
     Después de procesar correctamente:
 
-    1. Intenta eliminar la etiqueta configurada.
+    1. Elimina la etiqueta Gmail configurada.
     2. Marca el correo como leído.
-
-    Si el correo fue encontrado mediante la búsqueda de respaldo y
-    no tenía esa etiqueta, el STORE de eliminación puede no modificar
-    nada, pero igualmente será marcado como leído.
     """
 
     if not touched:
@@ -415,7 +448,9 @@ def delete_messages(
             password,
         )
 
-        all_mail = get_all_mail_folder(mail)
+        all_mail = get_all_mail_folder(
+            mail
+        )
 
         print(
             f"Using mailbox for cleanup: "
@@ -442,7 +477,8 @@ def delete_messages(
             )
 
             print(
-                f"Before cleanup UID {uid.decode()}: "
+                f"Before cleanup UID "
+                f"{uid.decode()}: "
                 f"{fetch_status} {fetch_data}"
             )
 
@@ -450,7 +486,7 @@ def delete_messages(
                 "STORE",
                 uid,
                 "-X-GM-LABELS",
-                quote_gmail_value(folder),
+                f'"{folder}"',
             )
 
             print(
@@ -467,7 +503,8 @@ def delete_messages(
             )
 
             print(
-                f"Mark seen UID {uid.decode()}: "
+                f"Mark seen UID "
+                f"{uid.decode()}: "
                 f"{seen_status} {seen_response}"
             )
 
@@ -478,7 +515,8 @@ def delete_messages(
             )
 
             print(
-                f"After cleanup UID {uid.decode()}: "
+                f"After cleanup UID "
+                f"{uid.decode()}: "
                 f"{fetch_status} {fetch_data}"
             )
 
