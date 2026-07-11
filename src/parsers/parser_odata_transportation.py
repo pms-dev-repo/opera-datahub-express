@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from datetime import datetime
 import re
+
 import pandas as pd
 
 from .pdf_engine import PdfEngine
@@ -12,7 +13,9 @@ from .pdf_repair import repair_pdf
 REPORT_NAME = "ODATA_Transportation"
 TARGET_TABLE = "odata_transportation"
 
-DATETIME_RE = re.compile(r"\d{2}-\d{2}-\d{2}\s+\d{2}:\d{2}")
+DATETIME_RE = re.compile(
+    r"\d{2}-\d{2}-\d{2}\s+\d{2}:\d{2}"
+)
 
 KNOWN_TRANSPORT_TYPES = {
     "MER/BMW/LUXURY CAR",
@@ -39,19 +42,35 @@ COLUMNS = {
 
 
 def clean_text(value) -> str:
-    value = str(value or "").strip()
+    if value is None:
+        return ""
+
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+
+    value = str(value).strip()
     value = value.replace("\ufffe", "")
 
     if value.startswith("*"):
         value = value[1:]
 
     value = re.sub(r"\s+", " ", value)
+
     return value.strip()
 
 
 def clean_guest_name(value: str) -> str:
     value = clean_text(value)
-    value = re.split(r"\s+[CTG]-", value)[0]
+
+    value = re.split(
+        r"\s+[SCTG]-\s*",
+        value,
+        maxsplit=1,
+    )[0]
+
     return value.strip()
 
 
@@ -62,7 +81,11 @@ def to_iso_date(value: str) -> str | None:
         return None
 
     try:
-        return datetime.strptime(value, "%d-%m-%y").date().isoformat()
+        return datetime.strptime(
+            value,
+            "%d-%m-%y",
+        ).date().isoformat()
+
     except Exception:
         return None
 
@@ -74,7 +97,45 @@ def to_iso_datetime(value: str) -> str | None:
         return None
 
     try:
-        return datetime.strptime(value, "%d-%m-%y %H:%M").isoformat(sep=" ")
+        parsed = datetime.strptime(
+            value,
+            "%d-%m-%y %H:%M",
+        )
+
+        return parsed.isoformat(
+            sep=" ",
+        )
+
+    except Exception:
+        return None
+
+
+def to_iso_time(value: str) -> str | None:
+    """
+    Convierte:
+
+        21-07-26 15:00
+
+    en:
+
+        15:00:00
+    """
+
+    value = clean_text(value)
+
+    if not value:
+        return None
+
+    try:
+        parsed = datetime.strptime(
+            value,
+            "%d-%m-%y %H:%M",
+        )
+
+        return parsed.time().strftime(
+            "%H:%M"
+        )
+
     except Exception:
         return None
 
@@ -86,45 +147,84 @@ def to_int(value):
         return None
 
     try:
-        return int(float(value.replace(",", "")))
+        return int(
+            float(
+                value.replace(",", "")
+            )
+        )
+
     except Exception:
         return None
 
 
-def build_engine(pdf_path: Path) -> tuple[PdfEngine, Path]:
+def build_engine(
+    pdf_path: Path,
+) -> tuple[PdfEngine, Path]:
     try:
         engine = PdfEngine(pdf_path)
         engine.group_lines()
+
         return engine, pdf_path
 
     except Exception as exc:
-        print(f"PDF read failed for {pdf_path.name}: {exc}")
-        print(f"Repairing PDF: {pdf_path.name}")
+        print(
+            f"PDF read failed for "
+            f"{pdf_path.name}: {exc}"
+        )
 
-        repaired_path = repair_pdf(pdf_path)
+        print(
+            f"Repairing PDF: "
+            f"{pdf_path.name}"
+        )
 
-        engine = PdfEngine(repaired_path)
+        repaired_path = repair_pdf(
+            pdf_path
+        )
+
+        engine = PdfEngine(
+            repaired_path
+        )
+
         engine.group_lines()
 
         return engine, repaired_path
 
 
-def text_in_range(words: list, x_min: float, x_max: float) -> str:
+def text_in_range(
+    words: list,
+    x_min: float,
+    x_max: float,
+) -> str:
     return " ".join(
-        clean_text(w["text"])
-        for w in words
-        if x_min <= float(w["x0"]) < x_max
+        clean_text(word["text"])
+        for word in words
+        if (
+            x_min
+            <= float(word["x0"])
+            < x_max
+        )
     ).strip()
 
 
-def extract_columns(words: list) -> dict:
+def extract_columns(
+    words: list,
+) -> dict:
     return {
-        col: text_in_range(words, x_min, x_max)
-        for col, (x_min, x_max) in COLUMNS.items()
+        column: text_in_range(
+            words,
+            x_min,
+            x_max,
+        )
+        for column, (
+            x_min,
+            x_max,
+        ) in COLUMNS.items()
     }
 
 
-def detect_direction(text: str) -> str | None:
+def detect_direction(
+    text: str,
+) -> str | None:
     if "Transport Type (PickUp)" in text:
         return "PICKUP"
 
@@ -134,14 +234,18 @@ def detect_direction(text: str) -> str | None:
     return None
 
 
-def detect_transport_type(text: str) -> str | None:
+def detect_transport_type(
+    text: str,
+) -> str | None:
     text = clean_text(text)
 
     for transport_type in KNOWN_TRANSPORT_TYPES:
         if text == transport_type:
             return transport_type
 
-        if text.endswith(transport_type):
+        if text.endswith(
+            transport_type
+        ):
             return transport_type
 
     return None
@@ -172,77 +276,153 @@ def is_noise(text: str) -> bool:
         "Resv. Status",
     )
 
-    return any(n in text for n in noise_contains)
+    return any(
+        noise in text
+        for noise in noise_contains
+    )
 
 
-def looks_like_transport_row(row: dict) -> bool:
-    return DATETIME_RE.fullmatch(clean_text(row.get("transport_datetime"))) is not None
+def looks_like_transport_row(
+    row: dict,
+) -> bool:
+    value = clean_text(
+        row.get(
+            "transport_datetime"
+        )
+    )
+
+    return (
+        DATETIME_RE.fullmatch(
+            value
+        )
+        is not None
+    )
 
 
-def append_continuation(rows: list, words: list, text: str) -> None:
+def append_continuation(
+    rows: list,
+    words: list,
+    text: str,
+) -> None:
     if not rows or not words:
         return
 
-    min_x = min(float(w["x0"]) for w in words)
+    min_x = min(
+        float(word["x0"])
+        for word in words
+    )
 
     if 405 <= min_x < 495:
+        current = clean_text(
+            rows[-1].get(
+                "transport_code"
+            )
+        )
+
         rows[-1]["transport_code"] = clean_text(
-            str(rows[-1].get("transport_code") or "") + " " + text
+            f"{current} {text}"
         )
 
     elif 330 <= min_x < 405:
+        current = clean_text(
+            rows[-1].get(
+                "carrier_code"
+            )
+        )
+
         rows[-1]["carrier_code"] = clean_text(
-            str(rows[-1].get("carrier_code") or "") + " " + text
+            f"{current} {text}"
         )
 
 
-def parse_odata_transportation(pdf_path: str | Path) -> pd.DataFrame:
-    original_pdf_path = Path(pdf_path)
+def parse_odata_transportation(
+    pdf_path: str | Path,
+) -> pd.DataFrame:
+    original_pdf_path = Path(
+        pdf_path
+    )
 
-    engine, _ = build_engine(original_pdf_path)
+    engine, _ = build_engine(
+        original_pdf_path
+    )
 
     lines_df = engine.group_lines()
 
-    rows = []
+    rows: list[dict] = []
 
     current_direction = None
     current_transport_type = None
 
     for _, line in lines_df.iterrows():
-        text = clean_text(line["text"])
+        text = clean_text(
+            line["text"]
+        )
+
         words = line["words"]
 
         if not text:
             continue
 
-        direction = detect_direction(text)
-        transport_type = detect_transport_type(text)
+        direction = detect_direction(
+            text
+        )
+
+        transport_type = detect_transport_type(
+            text
+        )
 
         if direction:
             current_direction = direction
+
             if transport_type:
-                current_transport_type = transport_type
+                current_transport_type = (
+                    transport_type
+                )
+
             continue
 
         if transport_type:
-            current_transport_type = transport_type
+            current_transport_type = (
+                transport_type
+            )
+
             continue
 
         if is_noise(text):
             continue
 
-        parsed = extract_columns(words)
+        parsed = extract_columns(
+            words
+        )
 
-        if looks_like_transport_row(parsed):
-            parsed["transport_direction"] = current_direction
-            parsed["transport_type"] = current_transport_type
-            parsed["source_report"] = REPORT_NAME
-            parsed["source_file"] = original_pdf_path.name
+        if looks_like_transport_row(
+            parsed
+        ):
+            parsed["transport_direction"] = (
+                current_direction
+            )
+
+            parsed["transport_type"] = (
+                current_transport_type
+            )
+
+            parsed["source_report"] = (
+                REPORT_NAME
+            )
+
+            parsed["source_file"] = (
+                original_pdf_path.name
+            )
 
             rows.append(parsed)
+
             continue
 
-        append_continuation(rows, words, text)
+        append_continuation(
+            rows,
+            words,
+            text,
+        )
 
     df = pd.DataFrame(rows)
 
@@ -250,9 +430,13 @@ def parse_odata_transportation(pdf_path: str | Path) -> pd.DataFrame:
         return df
 
     if "guest_name" in df.columns:
-        df["guest_name"] = df["guest_name"].apply(clean_guest_name)
+        df["guest_name"] = (
+            df["guest_name"]
+            .fillna("")
+            .apply(clean_guest_name)
+        )
 
-    for col in [
+    text_columns = [
         "station_code",
         "carrier_code",
         "transport_code",
@@ -260,17 +444,61 @@ def parse_odata_transportation(pdf_path: str | Path) -> pd.DataFrame:
         "vip",
         "transport_direction",
         "transport_type",
+    ]
+
+    for column in text_columns:
+        if column in df.columns:
+            df[column] = (
+                df[column]
+                .fillna("")
+                .apply(clean_text)
+            )
+
+    # Guardamos el valor original antes de convertirlo.
+    raw_transport_datetime = (
+        df["transport_datetime"]
+        .fillna("")
+        .copy()
+    )
+
+    df["transport_datetime"] = (
+        raw_transport_datetime.apply(
+            to_iso_datetime
+        )
+    )
+
+    df["transport_date"] = (
+        raw_transport_datetime.apply(
+            lambda value: (
+                to_iso_datetime(value)[:10]
+                if to_iso_datetime(value)
+                else None
+            )
+        )
+    )
+
+    df["transport_time"] = (
+        raw_transport_datetime.apply(
+            to_iso_time
+        )
+    )
+
+    if "stay_date" in df.columns:
+        df["stay_date"] = (
+            df["stay_date"]
+            .apply(to_iso_date)
+        )
+
+    for column in [
+        "adults",
+        "children",
+        "room_no",
     ]:
-        if col in df.columns:
-            df[col] = df[col].apply(clean_text)
-
-    df["transport_datetime"] = df["transport_datetime"].apply(to_iso_datetime)
-    df["transport_date"] = df["transport_datetime"].str[:10]
-    df["stay_date"] = df["stay_date"].apply(to_iso_date)
-
-    for col in ["adults", "children", "room_no"]:
-        if col in df.columns:
-            df[col] = df[col].apply(to_int)
+        if column in df.columns:
+            df[column] = (
+                df[column]
+                .apply(to_int)
+            )
 
     final_columns = [
         "transport_direction",
@@ -278,6 +506,7 @@ def parse_odata_transportation(pdf_path: str | Path) -> pd.DataFrame:
         "guest_name",
         "transport_datetime",
         "transport_date",
+        "transport_time",
         "stay_date",
         "station_code",
         "carrier_code",
@@ -291,50 +520,121 @@ def parse_odata_transportation(pdf_path: str | Path) -> pd.DataFrame:
         "source_file",
     ]
 
-    return df[[c for c in final_columns if c in df.columns]]
+    return df[
+        [
+            column
+            for column in final_columns
+            if column in df.columns
+        ]
+    ]
 
 
 def export_debug(
     pdf_path: str | Path,
-    output_path: str | Path = "data/debug/ODATA_Transportation/odata_transportation_debug.xlsx",
+    output_path: str | Path = (
+        "data/debug/ODATA_Transportation/"
+        "odata_transportation_debug.xlsx"
+    ),
 ) -> Path:
-    original_pdf_path = Path(pdf_path)
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    original_pdf_path = Path(
+        pdf_path
+    )
 
-    engine, _ = build_engine(original_pdf_path)
+    output_path = Path(
+        output_path
+    )
+
+    output_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    engine, _ = build_engine(
+        original_pdf_path
+    )
 
     words = engine.extract_words()
     lines = engine.group_lines()
-    parsed = parse_odata_transportation(original_pdf_path)
 
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        words.to_excel(writer, sheet_name="raw_words", index=False)
-        lines.drop(columns=["words"], errors="ignore").to_excel(
+    parsed = parse_odata_transportation(
+        original_pdf_path
+    )
+
+    with pd.ExcelWriter(
+        output_path,
+        engine="openpyxl",
+    ) as writer:
+        words.to_excel(
+            writer,
+            sheet_name="raw_words",
+            index=False,
+        )
+
+        lines.drop(
+            columns=["words"],
+            errors="ignore",
+        ).to_excel(
             writer,
             sheet_name="lines",
             index=False,
         )
-        engine.export_line_words(writer)
-        parsed.to_excel(writer, sheet_name="parsed_rows", index=False)
+
+        engine.export_line_words(
+            writer
+        )
+
+        parsed.to_excel(
+            writer,
+            sheet_name="parsed_rows",
+            index=False,
+        )
 
     return output_path
 
 
 if __name__ == "__main__":
-    files = list(Path("data/incoming").glob("ODATA_Transportation*.pdf"))
-    files += list(Path("data/incoming").glob("ODATA_Transportation*.PDF"))
-    files += list(Path("data/incoming").glob("odata_transportation*.pdf"))
-    files += list(Path("data/incoming").glob("odata_transportation*.PDF"))
+    files = list(
+        Path("data/incoming").glob(
+            "ODATA_Transportation*.pdf"
+        )
+    )
+
+    files += list(
+        Path("data/incoming").glob(
+            "ODATA_Transportation*.PDF"
+        )
+    )
+
+    files += list(
+        Path("data/incoming").glob(
+            "odata_transportation*.pdf"
+        )
+    )
+
+    files += list(
+        Path("data/incoming").glob(
+            "odata_transportation*.PDF"
+        )
+    )
 
     if not files:
         raise FileNotFoundError(
-            "No encontré ningún ODATA_Transportation*.PDF en data/incoming"
+            "No encontré ningún "
+            "ODATA_Transportation*.PDF "
+            "en data/incoming"
         )
 
     pdf = files[0]
 
-    print(f"Using: {pdf.name}")
+    print(
+        f"Using: {pdf.name}"
+    )
 
-    out = export_debug(pdf)
-    print(f"Debug exported: {out.resolve()}")
+    out = export_debug(
+        pdf
+    )
+
+    print(
+        f"Debug exported: "
+        f"{out.resolve()}"
+    )
