@@ -118,7 +118,7 @@ def to_iso_time(value: str) -> str | None:
 
     en:
 
-        15:00:00
+        15:00
     """
 
     value = clean_text(value)
@@ -132,9 +132,7 @@ def to_iso_time(value: str) -> str | None:
             "%d-%m-%y %H:%M",
         )
 
-        return parsed.time().strftime(
-            "%H:%M"
-        )
+        return parsed.strftime("%H:%M")
 
     except Exception:
         return None
