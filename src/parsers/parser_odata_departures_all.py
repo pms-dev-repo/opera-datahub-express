@@ -14,6 +14,17 @@ TARGET_TABLE = "odata_departures_all"
 
 DATE_RE = re.compile(r"\d{2}-\d{2}-\d{2}")
 
+KNOWN_RESERVATION_STATUSES = (
+    "CHECKED OUT",
+    "CHECKED IN",
+    "DUE OUT",
+    "NOSHOW",
+    "COUT",
+    "CKIN",
+    "GDP",
+    "CXL",
+)
+
 
 COLUMNS = {
     "room_no": (0, 35),
@@ -263,34 +274,32 @@ def looks_like_departure_row(
 
 def normalize_status_and_rate(row: dict) -> dict:
     """
-    Corrige casos donde el PDF junta rate_code y reservation_status.
+    Normaliza Resv. Status y corrige casos donde el PDF une
+    Rate Code + Reservation Status.
 
-    Ejemplo:
-        rate_code = PKGOLF3CKIN
-        reservation_status = ""
-
-    Resultado:
-        rate_code = PKGOLF3
-        reservation_status = CKIN
+    Ejemplos:
+        PKGOLF3CKIN -> rate_code=PKGOLF3, reservation_status=CKIN
+        RACKCOUT    -> rate_code=RACK, reservation_status=COUT
     """
     rate_code = clean_text(row.get("rate_code"))
     reservation_status = clean_text(
         row.get("reservation_status")
-    )
+    ).upper()
 
-    known_statuses = (
-        "CKIN",
-        "GDP",
-        "CXL",
-        "NOSHOW",
-        "CHECKED IN",
-        "CHECKED OUT",
-    )
+    # Si el status llegó separado, solo lo normalizamos.
+    compact_received = reservation_status.replace(" ", "")
 
+    for status in KNOWN_RESERVATION_STATUSES:
+        if compact_received == status.replace(" ", ""):
+            reservation_status = status
+            break
+
+    # En algunas filas el PDF pega el status al final del rate code.
     if not reservation_status and rate_code:
         upper_rate = rate_code.upper()
 
-        for status in known_statuses:
+        # Se revisan primero los textos más largos.
+        for status in KNOWN_RESERVATION_STATUSES:
             compact_status = status.replace(" ", "")
 
             if upper_rate.endswith(compact_status):
