@@ -46,8 +46,24 @@ SELECT
     a.accompanying_names,
     a.arrival_time,
     a.source_code,
-    TO_CHAR(t.transport_time::interval, 'HH24:MI') AS transport_time,
-    TO_CHAR(t.transport_time::interval + INTERVAL '1 hour', 'HH24:MI') AS exp_arr_hotel
+        TO_CHAR(
+        t.transport_time::interval,
+        'HH24:MI'
+    ) AS transport_time,
+
+    TO_CHAR(
+        t.transport_time::interval + INTERVAL '1 hour',
+        'HH24:MI'
+    ) AS exp_arr_hotel,
+
+    COALESCE(a.adults, 0)
+        + COALESCE(a.children, 0)
+        AS passengers,
+
+    GREATEST(
+        a.departure_date - a.arrival_date,
+        0
+    ) AS number_of_nights
 FROM public.odata_arr_detail a
 CROSS JOIN business_day bd
 LEFT JOIN public.odata_transportation t

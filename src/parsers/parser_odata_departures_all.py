@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from datetime import date
 import re
+
 import pandas as pd
 
 from .pdf_engine import PdfEngine
@@ -33,22 +34,69 @@ COLUMNS = {
 
 
 def clean_text(value) -> str:
-    value = str(value or "").strip()
+    if value is None:
+        return ""
+
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+
+    value = str(value).strip()
 
     if value.startswith("*"):
         value = value[1:]
 
+    value = value.replace("\ufffe", "")
     value = re.sub(r"\s+", " ", value)
+
     return value.strip()
 
 
 def clean_guest_name(value: str) -> str:
     value = clean_text(value)
 
-    value = re.split(r"\s+[CTG]-", value)[0]
-    value = re.sub(r"\bMaste r\b", "Master", value)
-    value = re.sub(r"\bMr \.", "Mr.", value)
-    value = re.sub(r"\bMrs \.", "Mrs.", value)
+    # Elimina Company, Travel Agent, Source o Group concatenado.
+    value = re.split(
+        r"\s+[SCTG]-\s*",
+        value,
+        maxsplit=1,
+    )[0]
+
+    # Elimina encabezados que puedan quedar pegados al nombre.
+    header_patterns = (
+        r"\s+(?:To|From)\s+Departure\s+Date\b",
+        r"\s+Departure\s+Date\s+Total\b",
+        r"\s+Room\s+Class\s+All\b",
+        r"\s+Room\s+Type\b",
+        r"\s+Profile\s+Type\s+All\b",
+        r"\s+Include\s+Due\b",
+    )
+
+    for pattern in header_patterns:
+        value = re.split(
+            pattern,
+            value,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0]
+
+    # Correcciones frecuentes del texto extraído del PDF.
+    replacements = (
+        (r"\bMaste r\b", "Master"),
+        (r"\bMr\s+\.", "Mr."),
+        (r"\bMrs\s+\.", "Mrs."),
+        (r"\bMs\s+\.", "Ms."),
+    )
+
+    for pattern, replacement in replacements:
+        value = re.sub(
+            pattern,
+            replacement,
+            value,
+            flags=re.IGNORECASE,
+        )
 
     return value.strip()
 
@@ -61,10 +109,17 @@ def to_iso_date(value: str) -> str | None:
 
     try:
         day, month, year = value.split("-")
+
         yy = int(year)
         current_yy = date.today().year % 100
         yyyy = 2000 + yy if yy <= current_yy else 1900 + yy
-        return date(yyyy, int(month), int(day)).isoformat()
+
+        return date(
+            yyyy,
+            int(month),
+            int(day),
+        ).isoformat()
+
     except Exception:
         return None
 
@@ -77,26 +132,40 @@ def to_int(value):
 
     try:
         return int(float(value.replace(",", "")))
+
     except Exception:
         return None
 
 
-def text_in_range(words: list, x_min: float, x_max: float) -> str:
+def text_in_range(
+    words: list,
+    x_min: float,
+    x_max: float,
+) -> str:
     return " ".join(
-        clean_text(w["text"])
-        for w in words
-        if x_min <= float(w["x0"]) < x_max
+        clean_text(word["text"])
+        for word in words
+        if x_min <= float(word["x0"]) < x_max
     ).strip()
 
 
 def extract_columns(words: list) -> dict:
     return {
-        col: text_in_range(words, x_min, x_max)
-        for col, (x_min, x_max) in COLUMNS.items()
+        column: text_in_range(
+            words,
+            x_min,
+            x_max,
+        )
+        for column, (
+            x_min,
+            x_max,
+        ) in COLUMNS.items()
     }
 
 
 def is_noise(text: str) -> bool:
+    text = clean_text(text)
+
     noise = (
         "Sandy Lane",
         "ODATA_Departures_All",
@@ -109,16 +178,57 @@ def is_noise(text: str) -> bool:
         "Source",
         "Group",
         "Total ",
+        "From Departure Date",
+        "To Departure Date",
+        "Departure Date Total",
+        "Room Class All",
+        "Room Type",
+        "Profile Type All",
+        "Include Due",
     )
 
-    return any(n == text or text.startswith(n) for n in noise)
+    return any(
+        item == text
+        or text.startswith(item)
+        for item in noise
+    )
 
 
-def get_departure_group_date(text: str) -> str | None:
+def is_header_continuation(text: str) -> bool:
+    text = clean_text(text)
+
+    patterns = (
+        r"^(?:To|From)\s+Departure\s+Date\b",
+        r"^Departure\s+Date\s+Total\b",
+        r"^Departure\s+\d{2}-\d{2}-\d{2}$",
+        r"^Total\s+\d+",
+        r"^Room\s+Class\s+All\b",
+        r"^Room\s+Type\b",
+        r"^Profile\s+Type\s+All\b",
+        r"^Include\s+Due\b",
+    )
+
+    return any(
+        re.search(
+            pattern,
+            text,
+            flags=re.IGNORECASE,
+        )
+        for pattern in patterns
+    )
+
+
+def get_departure_group_date(
+    text: str,
+) -> str | None:
     text = clean_text(text)
 
     if text.startswith("Departure "):
-        value = text.replace("Departure ", "").strip()
+        value = text.replace(
+            "Departure ",
+            "",
+            1,
+        ).strip()
 
         if DATE_RE.fullmatch(value):
             return value
@@ -126,75 +236,209 @@ def get_departure_group_date(text: str) -> str | None:
     return None
 
 
-def looks_like_departure_row(row: dict) -> bool:
+def looks_like_departure_row(
+    row: dict,
+) -> bool:
     return (
-        clean_text(row.get("room_no")).isdigit()
-        and clean_text(row.get("guest_name"))
-        and DATE_RE.fullmatch(clean_text(row.get("arrival_date") or "")) is not None
-        and DATE_RE.fullmatch(clean_text(row.get("departure_date") or "")) is not None
+        clean_text(
+            row.get("room_no")
+        ).isdigit()
+        and clean_text(
+            row.get("guest_name")
+        )
+        and DATE_RE.fullmatch(
+            clean_text(
+                row.get("arrival_date") or ""
+            )
+        )
+        is not None
+        and DATE_RE.fullmatch(
+            clean_text(
+                row.get("departure_date") or ""
+            )
+        )
+        is not None
     )
 
 
-def append_continuation(rows: list[dict], words: list, text: str) -> None:
+def normalize_status_and_rate(row: dict) -> dict:
+    """
+    Corrige casos donde el PDF junta rate_code y reservation_status.
+
+    Ejemplo:
+        rate_code = PKGOLF3CKIN
+        reservation_status = ""
+
+    Resultado:
+        rate_code = PKGOLF3
+        reservation_status = CKIN
+    """
+    rate_code = clean_text(row.get("rate_code"))
+    reservation_status = clean_text(
+        row.get("reservation_status")
+    )
+
+    known_statuses = (
+        "CKIN",
+        "GDP",
+        "CXL",
+        "NOSHOW",
+        "CHECKED IN",
+        "CHECKED OUT",
+    )
+
+    if not reservation_status and rate_code:
+        upper_rate = rate_code.upper()
+
+        for status in known_statuses:
+            compact_status = status.replace(" ", "")
+
+            if upper_rate.endswith(compact_status):
+                rate_code = rate_code[
+                    : len(rate_code) - len(compact_status)
+                ].strip()
+
+                reservation_status = status
+                break
+
+    row["rate_code"] = rate_code
+    row["reservation_status"] = reservation_status
+
+    return row
+
+
+def append_continuation(
+    rows: list[dict],
+    words: list,
+    text: str,
+) -> None:
     if not rows or not words:
         return
 
     text = clean_text(text)
 
-    if text.startswith("Share with:"):
-        rows[-1]["share_with"] = clean_text(
-            str(rows[-1].get("share_with") or "") + " " + text.replace("Share with:", "")
-        )
+    if not text:
         return
 
-    guest_part = text_in_range(words, 35, 122)
-    company_part = text_in_range(words, 122, 282)
+    if is_header_continuation(text):
+        return
 
-    if guest_part:
-        current = clean_text(rows[-1].get("guest_name"))
-        rows[-1]["guest_name"] = clean_text((current + " " + guest_part).strip())
+    if text.startswith("Share with:"):
+        current = clean_text(
+            rows[-1].get("share_with")
+        )
 
-    if company_part:
-        current = clean_text(rows[-1].get("company"))
-        rows[-1]["company"] = clean_text((current + " " + company_part).strip())
+        share_value = clean_text(
+            text.replace(
+                "Share with:",
+                "",
+                1,
+            )
+        )
+
+        rows[-1]["share_with"] = clean_text(
+            f"{current} {share_value}"
+        )
+
+        return
+
+    guest_part = text_in_range(
+        words,
+        35,
+        122,
+    )
+
+    company_part = text_in_range(
+        words,
+        122,
+        282,
+    )
+
+    if guest_part and not is_header_continuation(
+        guest_part
+    ):
+        current = clean_text(
+            rows[-1].get("guest_name")
+        )
+
+        rows[-1]["guest_name"] = clean_guest_name(
+            f"{current} {guest_part}"
+        )
+
+    if company_part and not is_header_continuation(
+        company_part
+    ):
+        current = clean_text(
+            rows[-1].get("company")
+        )
+
+        rows[-1]["company"] = clean_text(
+            f"{current} {company_part}"
+        )
 
 
-def parse_odata_departures_all(pdf_path: str | Path) -> pd.DataFrame:
+def parse_odata_departures_all(
+    pdf_path: str | Path,
+) -> pd.DataFrame:
     pdf_path = Path(pdf_path)
     engine = PdfEngine(pdf_path)
 
     lines_df = engine.group_lines()
-    rows = []
+    rows: list[dict] = []
 
     current_departure_group_date = None
 
     for _, line in lines_df.iterrows():
-        text = clean_text(line["text"])
+        text = clean_text(
+            line["text"]
+        )
+
         words = line["words"]
 
         if not text:
             continue
 
-        group_date = get_departure_group_date(text)
+        group_date = get_departure_group_date(
+            text
+        )
+
         if group_date:
-            current_departure_group_date = group_date
+            current_departure_group_date = (
+                group_date
+            )
             continue
 
         if is_noise(text):
             continue
 
-        parsed = extract_columns(words)
+        parsed = extract_columns(
+            words
+        )
 
-        if looks_like_departure_row(parsed):
-            parsed["departure_group_date"] = current_departure_group_date
-            parsed["departure_time"] = None
-            parsed["share_with"] = None
+        if looks_like_departure_row(
+            parsed
+        ):
+            parsed = normalize_status_and_rate(
+                parsed
+            )
+
+            parsed["departure_group_date"] = (
+                current_departure_group_date
+            )
+
+            parsed["departure_time"] = ""
+            parsed["share_with"] = ""
             parsed["source_report"] = REPORT_NAME
             parsed["source_file"] = pdf_path.name
+
             rows.append(parsed)
             continue
 
-        append_continuation(rows, words, text)
+        append_continuation(
+            rows,
+            words,
+            text,
+        )
 
     df = pd.DataFrame(rows)
 
@@ -202,9 +446,13 @@ def parse_odata_departures_all(pdf_path: str | Path) -> pd.DataFrame:
         return df
 
     if "guest_name" in df.columns:
-        df["guest_name"] = df["guest_name"].apply(clean_guest_name)
+        df["guest_name"] = (
+            df["guest_name"]
+            .fillna("")
+            .apply(clean_guest_name)
+        )
 
-    for col in [
+    text_columns = [
         "company",
         "room_type",
         "reservation_status",
@@ -213,27 +461,41 @@ def parse_odata_departures_all(pdf_path: str | Path) -> pd.DataFrame:
         "rate_code",
         "vip",
         "share_with",
-    ]:
-        if col in df.columns:
-            df[col] = df[col].apply(clean_text)
+    ]
 
-    for col in [
+    for column in text_columns:
+        if column in df.columns:
+            df[column] = (
+                df[column]
+                .fillna("")
+                .apply(clean_text)
+            )
+
+    date_columns = [
         "arrival_date",
         "departure_date",
         "departure_group_date",
-    ]:
-        if col in df.columns:
-            df[col] = df[col].apply(to_iso_date)
+    ]
 
-    for col in [
+    for column in date_columns:
+        if column in df.columns:
+            df[column] = df[column].apply(
+                to_iso_date
+            )
+
+    integer_columns = [
         "room_no",
         "nights",
         "adults",
         "children",
         "rooms",
-    ]:
-        if col in df.columns:
-            df[col] = df[col].apply(to_int)
+    ]
+
+    for column in integer_columns:
+        if column in df.columns:
+            df[column] = df[column].apply(
+                to_int
+            )
 
     final_columns = [
         "room_no",
@@ -256,45 +518,98 @@ def parse_odata_departures_all(pdf_path: str | Path) -> pd.DataFrame:
         "source_file",
     ]
 
-    return df[[c for c in final_columns if c in df.columns]]
+    return df[
+        [
+            column
+            for column in final_columns
+            if column in df.columns
+        ]
+    ]
 
 
 def export_debug(
     pdf_path: str | Path,
-    output_path: str | Path = "data/debug/ODATA_Departures_All/odata_departures_all_debug.xlsx",
+    output_path: str | Path = (
+        "data/debug/ODATA_Departures_All/"
+        "odata_departures_all_debug.xlsx"
+    ),
 ) -> Path:
     pdf_path = Path(pdf_path)
     output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    output_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     engine = PdfEngine(pdf_path)
 
     words = engine.extract_words()
     lines = engine.group_lines()
-    parsed = parse_odata_departures_all(pdf_path)
+    parsed = parse_odata_departures_all(
+        pdf_path
+    )
 
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        words.to_excel(writer, sheet_name="raw_words", index=False)
-        lines.drop(columns=["words"], errors="ignore").to_excel(
+    with pd.ExcelWriter(
+        output_path,
+        engine="openpyxl",
+    ) as writer:
+        words.to_excel(
+            writer,
+            sheet_name="raw_words",
+            index=False,
+        )
+
+        lines.drop(
+            columns=["words"],
+            errors="ignore",
+        ).to_excel(
             writer,
             sheet_name="lines",
             index=False,
         )
+
         engine.export_line_words(writer)
-        parsed.to_excel(writer, sheet_name="parsed_rows", index=False)
+
+        parsed.to_excel(
+            writer,
+            sheet_name="parsed_rows",
+            index=False,
+        )
 
     return output_path
 
 
 if __name__ == "__main__":
-    files = list(Path("data/incoming").glob("ODATA_Departures_All*.pdf"))
-    files += list(Path("data/incoming").glob("ODATA_Departures_All*.PDF"))
-    files += list(Path("data/incoming").glob("odata_departures_all*.pdf"))
-    files += list(Path("data/incoming").glob("odata_departures_all*.PDF"))
+    files = list(
+        Path("data/incoming").glob(
+            "ODATA_Departures_All*.pdf"
+        )
+    )
+
+    files += list(
+        Path("data/incoming").glob(
+            "ODATA_Departures_All*.PDF"
+        )
+    )
+
+    files += list(
+        Path("data/incoming").glob(
+            "odata_departures_all*.pdf"
+        )
+    )
+
+    files += list(
+        Path("data/incoming").glob(
+            "odata_departures_all*.PDF"
+        )
+    )
 
     if not files:
         raise FileNotFoundError(
-            "No encontré ningún ODATA_Departures_All*.PDF en data/incoming"
+            "No encontré ningún "
+            "ODATA_Departures_All*.PDF "
+            "en data/incoming"
         )
 
     pdf = files[0]
@@ -302,4 +617,8 @@ if __name__ == "__main__":
     print(f"Using: {pdf.name}")
 
     out = export_debug(pdf)
-    print(f"Debug exported: {out.resolve()}")
+
+    print(
+        f"Debug exported: "
+        f"{out.resolve()}"
+    )
