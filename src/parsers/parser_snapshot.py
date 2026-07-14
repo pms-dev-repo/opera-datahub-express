@@ -74,6 +74,7 @@ def is_noise(text: str) -> bool:
         or text.startswith("Reservation Status")
         or text.startswith("Confirmation Number")
         or text.startswith("Source Code")
+        or text.startswith("Rate Code")
         or text.startswith("Stay Date")
         or text.startswith("Room Type")
         or text.startswith("Room Children")
@@ -93,6 +94,7 @@ def is_noise(text: str) -> bool:
             "Ages",
             "Source",
             "Code",
+            "Rate",
             "IN",
         }
     )
@@ -181,21 +183,31 @@ def parse_line(text: str) -> dict | None:
 
     children_ages = ""
     source_code = ""
+    rate_code = ""
 
-    # Source Code viene al final y comienza con una letra:
-    # DIR, TOP, TRV, etc.
-    if extras and SOURCE_CODE_RE.fullmatch(extras[-1]):
-        source_code = extras.pop()
+    # Nuevo layout después de Room:
+    #
+    #   [Children Ages] [Source Code] [Rate Code]
+    #
+    # Ejemplos:
+    #   13-16 DIR BA-PACK 8+
+    #   DIR COMP
+    #   TOP HOUSE
+    #
+    # Children Ages, cuando existe, siempre aparece primero.
+    if extras and CHILDREN_AGES_RE.fullmatch(extras[0]):
+        children_ages = extras.pop(0)
 
-    # Lo que queda corresponde a Children Ages.
-    # Ejemplos: 1, 10, 13-16, 3-9-12.
+    # Source Code aparece después de Children Ages.
+    # Debe comenzar con una letra: DIR, TOP, TRV, etc.
+    if extras and SOURCE_CODE_RE.fullmatch(extras[0]):
+        source_code = extras.pop(0)
+
+    # Todo lo restante pertenece a Rate Code.
+    # Se conserva unido porque puede contener espacios:
+    # BA-PACK 8+, SEPPKG TO, etc.
     if extras:
-        possible_ages = "-".join(extras)
-
-        if CHILDREN_AGES_RE.fullmatch(possible_ages):
-            children_ages = possible_ages
-        else:
-            children_ages = " ".join(extras)
+        rate_code = " ".join(extras)
 
     return {
         "adults": adults,
@@ -212,6 +224,7 @@ def parse_line(text: str) -> dict | None:
         "room_no": room_no,
         "children_ages": clean_text(children_ages),
         "source_code": clean_text(source_code),
+        "rate_code": clean_text(rate_code),
     }
 
 
@@ -317,6 +330,7 @@ def parse_snapshot(
     for col in [
         "reservation_status",
         "source_code",
+        "rate_code",
         "room_type",
         "children_ages",
     ]:
@@ -341,6 +355,7 @@ def parse_snapshot(
         "room_no",
         "children_ages",
         "source_code",
+        "rate_code",
         "source_report",
         "source_file",
     ]
@@ -411,6 +426,11 @@ def export_debug(
                 ),
                 "source_code": (
                     parsed_line.get("source_code")
+                    if parsed_line
+                    else None
+                ),
+                "rate_code": (
+                    parsed_line.get("rate_code")
                     if parsed_line
                     else None
                 ),
