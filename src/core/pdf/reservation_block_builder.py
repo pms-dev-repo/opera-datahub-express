@@ -126,6 +126,18 @@ class ReservationBlockBuilder:
             page = self._block_page(source_block)
             source_block_id = self._block_id(source_block)
 
+            print()
+            print("=" * 100)
+            print(f"SOURCE BLOCK={source_block_id} PAGE={page}")
+            print("=" * 100)
+            for l in self._block_lines(source_block):
+                print(self._line_text(l))
+            print()
+
+            # original page/block assignment removed below
+            page = self._block_page(source_block)
+            source_block_id = self._block_id(source_block)
+
             for line in self._block_lines(source_block):
                 text = self._line_text(line)
 
@@ -134,6 +146,8 @@ class ReservationBlockBuilder:
 
                 group_match = self.ARRIVAL_GROUP_RE.match(text)
                 if group_match:
+                    print()
+                    print(f">>> ARRIVAL GROUP FOUND: {group_match.group('date')}")
                     if current is not None:
                         logical.append(
                             self._finalize(
@@ -147,6 +161,8 @@ class ReservationBlockBuilder:
                     arrival_group = self._normalize_date(
                         group_match.group("date")
                     )
+                    print(f">>> NORMALIZED: {arrival_group}")
+                    print()
                     continue
 
                 if self._is_noise(text):
@@ -182,6 +198,9 @@ class ReservationBlockBuilder:
                             )
                         )
                         next_block_id += 1
+
+                    print(f"START RESERVATION -> ArrivalGroup={arrival_group}")
+                    print(text)
 
                     current = _Candidate(
                         page=page,
@@ -317,6 +336,10 @@ class ReservationBlockBuilder:
             "source_block_id": candidate.source_block_id,
         }
 
+        print(
+            f"FINALIZE -> Block={logical_block_id} ArrivalGroup={candidate.arrival_group}"
+        )
+        print(self._line_text(candidate.main_line))
         return self._construct_reservation_block(values)
 
     @staticmethod
