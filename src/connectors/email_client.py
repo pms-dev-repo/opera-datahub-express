@@ -3,8 +3,17 @@ from __future__ import annotations
 import email
 import imaplib
 import re
+from dataclasses import dataclass
 from email.header import decode_header, make_header
 from pathlib import Path
+
+
+@dataclass
+class EmailDownload:
+    folder: str
+    uid: bytes
+    attachments: list[Path]
+
 
 
 ALLOWED_EXTENSIONS = (".pdf",)
@@ -206,7 +215,7 @@ def download_csv_attachments(
     password: str,
     folder: str,
     incoming_dir: Path,
-) -> list[tuple[str, bytes]]:
+) -> list[EmailDownload]:
     """
     Descarga archivos PDF no leídos.
 
@@ -216,10 +225,10 @@ def download_csv_attachments(
     basada en los asuntos snapshot y ODATA_.
 
     Returns:
-        list[(folder, uid)]
+        One EmailDownload per email containing the UID and saved attachments.
     """
 
-    touched: list[tuple[str, bytes]] = []
+    touched: list[EmailDownload] = []
 
     if not user or not password:
         print(
@@ -357,7 +366,7 @@ def download_csv_attachments(
                 )
                 continue
 
-            saved_any = False
+            saved_paths: list[Path] = []
 
             for part in msg.walk():
                 filename = part.get_filename()
@@ -404,11 +413,15 @@ def download_csv_attachments(
                     f"({len(payload):,} bytes)"
                 )
 
-                saved_any = True
+                saved_paths.append(out_path)
 
-            if saved_any:
+            if saved_paths:
                 touched.append(
-                    (folder, uid)
+                    EmailDownload(
+                        folder=folder,
+                        uid=uid,
+                        attachments=saved_paths,
+                    )
                 )
 
         return touched
@@ -425,7 +438,7 @@ def delete_messages(
     port: int,
     user: str,
     password: str,
-    touched: list[tuple[str, bytes]],
+    touched: list[EmailDownload],
 ) -> None:
     """
     Después de procesar correctamente:
@@ -469,7 +482,9 @@ def delete_messages(
         if select_status != "OK":
             return
 
-        for folder, uid in touched:
+        for item in touched:
+            folder = item.folder
+            uid = item.uid
             fetch_status, fetch_data = mail.uid(
                 "FETCH",
                 uid,

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from . import settings
 from .connectors.email_client import (
+    EmailDownload,
     download_csv_attachments,
     delete_messages,
 )
@@ -48,24 +49,14 @@ def get_pdf_files() -> list[Path]:
     return sorted(files_by_path.values())
 
 
-def run() -> None:
-    touched_messages = download_csv_attachments(
-        settings.EMAIL_HOST,
-        settings.EMAIL_PORT,
-        settings.EMAIL_USER,
-        settings.EMAIL_PASSWORD,
-        settings.EMAIL_FOLDER,
-        settings.INCOMING_DIR,
-    )
+def process_download(
+    engine,
+    download: EmailDownload,
+) -> tuple[bool, int]:
+    success = True
+    loaded_rows = 0
 
-    engine = get_engine(settings.DATABASE_URL)
-    ok = True
-
-    files = get_pdf_files()
-
-    print(f"PDF files to process: {len(files)}")
-
-    for path in files:
+    for path in download.attachments:
         try:
             size = path.stat().st_size if path.exists() else 0
             print(f"Processing: {path.name} ({size:,} bytes)")
@@ -84,10 +75,11 @@ def run() -> None:
 
             print(f"{table}: loaded {len(df)} rows")
 
+            loaded_rows += len(df)
             move_file(path, settings.ARCHIVE_DIR)
 
         except Exception as exc:
-            ok = False
+            success = False
 
             print()
             print("=" * 80)
@@ -113,25 +105,92 @@ def run() -> None:
 
             move_file(path, settings.ERROR_DIR)
 
-    if ok:
+    return success, loaded_rows
+
+
+def run() -> None:
+    downloads = download_csv_attachments(
+        settings.EMAIL_HOST,
+        settings.EMAIL_PORT,
+        settings.EMAIL_USER,
+        settings.EMAIL_PASSWORD,
+        settings.EMAIL_FOLDER,
+        settings.INCOMING_DIR,
+    )
+
+    engine = get_engine(settings.DATABASE_URL)
+
+    total_messages = len(downloads)
+    successful_messages: list[EmailDownload] = []
+    failed_messages = 0
+    total_rows = 0
+    any_file_failed = False
+
+    print(f"Email messages to process: {total_messages}")
+
+    for download in downloads:
+        uid_text = download.uid.decode(errors="ignore")
+
+        print()
+        print("-" * 80)
+        print(
+            f"Processing email UID {uid_text} "
+            f"with {len(download.attachments)} attachment(s)"
+        )
+        print("-" * 80)
+
+        success, loaded_rows = process_download(
+            engine,
+            download,
+        )
+
+        total_rows += loaded_rows
+
+        if success:
+            successful_messages.append(download)
+        else:
+            failed_messages += 1
+            any_file_failed = True
+
+    if not any_file_failed:
         enrich_child_buckets_from_snapshot(engine)
 
-    if ok and settings.EMAIL_DELETE_AFTER_SUCCESS and touched_messages:
+    if (
+        settings.EMAIL_DELETE_AFTER_SUCCESS
+        and successful_messages
+    ):
         delete_messages(
             settings.EMAIL_HOST,
             settings.EMAIL_PORT,
             settings.EMAIL_USER,
             settings.EMAIL_PASSWORD,
-            touched_messages,
+            successful_messages,
         )
 
-        print("Processed email messages deleted/expunged.")
+        print(
+            f"Successfully cleaned up "
+            f"{len(successful_messages)} email message(s)."
+        )
 
-    elif not ok:
-        print("Some files failed. Email messages were NOT deleted.")
+    print()
+    print("=" * 80)
+    print("SUMMARY")
+    print("=" * 80)
+    print(f"Messages reviewed : {total_messages}")
+    print(f"Successful        : {len(successful_messages)}")
+    print(f"Failed            : {failed_messages}")
+    print(f"Rows loaded       : {total_rows}")
 
+    if not downloads:
+        print("No email messages were downloaded.")
+    elif failed_messages:
+        print(
+            "Failed messages were kept in Gmail for review/retry."
+        )
     else:
-        print("No email messages to delete.")
+        print("All downloaded messages were processed successfully.")
+
+    print("=" * 80)
 
 
 if __name__ == "__main__":
