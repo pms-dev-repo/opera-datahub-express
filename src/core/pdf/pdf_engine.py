@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Generic PDF extraction engine for OPERA-style reports.
 
 This module is intentionally report-agnostic. It extracts words, groups them
@@ -11,6 +9,9 @@ other report-specific concept. Those rules belong in report profiles and
 parsers.
 """
 
+from __future__ import annotations
+
+
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Iterable
@@ -18,6 +19,7 @@ from typing import Any, Iterable
 import pandas as pd
 import pdfplumber
 
+from src.core.pdf.debug_exporter import DebugExporter
 from src.core.pdf.models import Band, Block, Line, Word
 
 
@@ -655,26 +657,13 @@ class PdfEngine:
 
         pd.DataFrame(rows).to_excel(writer, sheet_name="line_words", index=False)
 
-    def export_debug(self, output_path: str | Path) -> Path:
-        """Export all generic extraction layers to a single XLSX workbook."""
-        destination = Path(output_path)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-
-        with pd.ExcelWriter(destination, engine="openpyxl") as writer:
-            self.extract_words().drop(columns=["words"], errors="ignore").to_excel(
-                writer, sheet_name="raw_words", index=False
-            )
-            self.group_lines().drop(columns=["words"], errors="ignore").to_excel(
-                writer, sheet_name="lines", index=False
-            )
-            self.visual_bands().to_excel(writer, sheet_name="visual_bands", index=False)
-            self.group_visual_blocks().drop(columns=["lines"], errors="ignore").to_excel(
-                writer, sheet_name="visual_blocks", index=False
-            )
-            self.page_metrics().to_excel(writer, sheet_name="page_metrics", index=False)
-            self.export_line_words(writer)
-
-        return destination
+    def export_debug(
+        self,
+        output_path: str | Path,
+        **kwargs: Any,
+    ) -> Path:
+        """Export engine and optional parser diagnostics to Excel."""
+        return DebugExporter(self).export(output_path, **kwargs)
 
     def to_dict(self) -> dict[str, Any]:
         """Return typed engine output as serializable dictionaries."""
