@@ -1,113 +1,479 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
+
 import pandas as pd
 import pdfplumber
 
-from .pdf_repair import repair_pdf
-
 
 class PdfEngine:
-    def __init__(self, pdf_file: str | Path):
-        self.original_pdf_file = Path(pdf_file)
-        self.pdf_file = self.original_pdf_file
+    """
+    PDF extraction engine with visual row-band metadata.
 
-    def _open_pdf(self):
-        try:
-            return pdfplumber.open(self.pdf_file)
-        except Exception as exc:
-            print(f"PDF read failed for {self.original_pdf_file.name}: {exc}")
-            print(f"Repairing PDF: {self.original_pdf_file.name}")
+    Existing public methods preserved:
+      - extract_words()
+      - group_lines()
+      - export_line_words()
 
-            self.pdf_file = repair_pdf(self.original_pdf_file)
-            return pdfplumber.open(self.pdf_file)
+    New metadata returned by extract_words()/group_lines():
+      - band_id
+      - shade: "gray", "white", or "header"
+      - band_top / band_bottom
+      - page_number
+    """
 
-    def extract_words(self) -> pd.DataFrame:
-        rows = []
+    def __init__(
+        self,
+        pdf_path: str | Path,
+        line_tolerance: float = 2.5,
+        gray_tolerance: float = 0.025,
+        min_band_width_ratio: float = 0.85,
+    ) -> None:
+        self.pdf_path = Path(pdf_path)
+        self.line_tolerance = float(line_tolerance)
+        self.gray_tolerance = float(gray_tolerance)
+        self.min_band_width_ratio = float(min_band_width_ratio)
 
-        with self._open_pdf() as pdf:
-            for page_number, page in enumerate(pdf.pages, start=1):
-                words = page.extract_words(
-                    keep_blank_chars=False,
-                    use_text_flow=False,
-                    extra_attrs=[],
+        self._words_df: pd.DataFrame | None = None
+        self._lines_df: pd.DataFrame | None = None
+        self._bands_by_page: dict[int, list[dict[str, Any]]] = {}
+
+    @staticmethod
+    def _clean_text(value: Any) -> str:
+        value = str(value or "").replace("\ufffe", "").strip()
+        return " ".join(value.split())
+
+    @staticmethod
+    def _color_to_gray(value: Any) -> float | None:
+        """
+        Convert PDF grayscale/RGB values to a single 0..1 brightness.
+        """
+        if value is None:
+            return None
+
+        if isinstance(value, (int, float)):
+            return float(value)
+
+        if isinstance(value, (tuple, list)) and value:
+            numeric = [float(v) for v in value if isinstance(v, (int, float))]
+            if not numeric:
+                return None
+            return sum(numeric) / len(numeric)
+
+        return None
+
+    def _detect_gray_rectangles(
+        self,
+        page: pdfplumber.page.Page,
+        page_number: int,
+    ) -> list[dict[str, Any]]:
+        rectangles: list[dict[str, Any]] = []
+
+        for rect in page.rects:
+            width = float(rect.get("width") or 0)
+            height = float(rect.get("height") or 0)
+            brightness = self._color_to_gray(
+                rect.get("non_stroking_color")
+            )
+
+            if brightness is None:
+                continue
+
+            # OPERA alternating bands are very wide, light-gray rectangles.
+            if (
+                width >= float(page.width) * self.min_band_width_ratio
+                and height >= 8
+                and abs(brightness - 0.96) <= self.gray_tolerance
+            ):
+                rectangles.append(
+                    {
+                        "page_number": page_number,
+                        "top": float(rect["top"]),
+                        "bottom": float(rect["bottom"]),
+                        "x0": float(rect["x0"]),
+                        "x1": float(rect["x1"]),
+                        "shade": "gray",
+                        "brightness": brightness,
+                    }
                 )
 
-                for w in words:
-                    rows.append({
-                        "page": page_number,
-                        "text": w.get("text"),
-                        "x0": w.get("x0"),
-                        "x1": w.get("x1"),
-                        "top": w.get("top"),
-                        "bottom": w.get("bottom"),
-                    })
+        rectangles.sort(key=lambda item: item["top"])
+        return rectangles
 
-        return pd.DataFrame(rows)
+    @staticmethod
+    def _build_visual_bands(
+        page_number: int,
+        page_height: float,
+        gray_rectangles: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """
+        Build alternating gray/white visual regions.
 
-    def group_lines(self, y_tolerance: float = 3) -> pd.DataFrame:
-        words = self.extract_words()
+        Gray rectangles are explicit PDF objects. White bands are inferred
+        from the vertical gaps between gray rectangles.
+        """
+        if not gray_rectangles:
+            return [
+                {
+                    "page_number": page_number,
+                    "band_id": f"{page_number}:0",
+                    "top": 0.0,
+                    "bottom": float(page_height),
+                    "shade": "header",
+                }
+            ]
 
-        if words.empty:
-            return pd.DataFrame(columns=["page", "top", "text", "words"])
+        bands: list[dict[str, Any]] = []
+        cursor = 0.0
+        local_id = 0
 
-        words = words.sort_values(["page", "top", "x0"]).reset_index(drop=True)
+        for gray in gray_rectangles:
+            gray_top = float(gray["top"])
+            gray_bottom = float(gray["bottom"])
 
-        lines = []
+            if gray_top > cursor:
+                bands.append(
+                    {
+                        "page_number": page_number,
+                        "band_id": f"{page_number}:{local_id}",
+                        "top": cursor,
+                        "bottom": gray_top,
+                        "shade": "white",
+                    }
+                )
+                local_id += 1
 
-        for page, page_words in words.groupby("page"):
-            current_words = []
-            current_top = None
+            bands.append(
+                {
+                    "page_number": page_number,
+                    "band_id": f"{page_number}:{local_id}",
+                    "top": gray_top,
+                    "bottom": gray_bottom,
+                    "shade": "gray",
+                }
+            )
+            local_id += 1
+            cursor = max(cursor, gray_bottom)
 
-            for _, word in page_words.iterrows():
-                word_top = float(word["top"])
+        if cursor < page_height:
+            bands.append(
+                {
+                    "page_number": page_number,
+                    "band_id": f"{page_number}:{local_id}",
+                    "top": cursor,
+                    "bottom": float(page_height),
+                    "shade": "white",
+                }
+            )
 
-                if current_top is None:
-                    current_top = word_top
-                    current_words = [word.to_dict()]
+        return bands
+
+    @staticmethod
+    def _band_for_vertical_center(
+        center_y: float,
+        bands: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        for band in bands:
+            if float(band["top"]) <= center_y < float(band["bottom"]):
+                return band
+        return None
+
+    def extract_words(self, force: bool = False) -> pd.DataFrame:
+        if self._words_df is not None and not force:
+            return self._words_df.copy()
+
+        records: list[dict[str, Any]] = []
+        self._bands_by_page = {}
+
+        with pdfplumber.open(self.pdf_path) as pdf:
+            for page_number, page in enumerate(pdf.pages, start=1):
+                gray_rectangles = self._detect_gray_rectangles(
+                    page,
+                    page_number,
+                )
+                bands = self._build_visual_bands(
+                    page_number,
+                    float(page.height),
+                    gray_rectangles,
+                )
+                self._bands_by_page[page_number] = bands
+
+                words = page.extract_words(
+                    x_tolerance=1,
+                    y_tolerance=2,
+                    keep_blank_chars=False,
+                    use_text_flow=False,
+                )
+
+                for word_index, word in enumerate(words, start=1):
+                    text = self._clean_text(word.get("text"))
+                    if not text:
+                        continue
+
+                    top = float(word["top"])
+                    bottom = float(word["bottom"])
+                    center_y = (top + bottom) / 2
+
+                    band = self._band_for_vertical_center(
+                        center_y,
+                        bands,
+                    )
+
+                    records.append(
+                        {
+                            "page_number": page_number,
+                            "word_index": word_index,
+                            "text": text,
+                            "x0": float(word["x0"]),
+                            "x1": float(word["x1"]),
+                            "top": top,
+                            "bottom": bottom,
+                            "doctop": float(
+                                word.get("doctop", top)
+                            ),
+                            "width": float(
+                                word.get(
+                                    "width",
+                                    float(word["x1"])
+                                    - float(word["x0"]),
+                                )
+                            ),
+                            "height": float(
+                                word.get(
+                                    "height",
+                                    bottom - top,
+                                )
+                            ),
+                            "band_id": (
+                                band["band_id"]
+                                if band
+                                else None
+                            ),
+                            "shade": (
+                                band["shade"]
+                                if band
+                                else "unknown"
+                            ),
+                            "band_top": (
+                                band["top"]
+                                if band
+                                else None
+                            ),
+                            "band_bottom": (
+                                band["bottom"]
+                                if band
+                                else None
+                            ),
+                        }
+                    )
+
+        self._words_df = pd.DataFrame(records)
+        return self._words_df.copy()
+
+    def group_lines(self, force: bool = False) -> pd.DataFrame:
+        if self._lines_df is not None and not force:
+            return self._lines_df.copy()
+
+        words_df = self.extract_words(force=force)
+
+        if words_df.empty:
+            self._lines_df = pd.DataFrame(
+                columns=[
+                    "page_number",
+                    "line_number",
+                    "text",
+                    "x0",
+                    "x1",
+                    "top",
+                    "bottom",
+                    "band_id",
+                    "shade",
+                    "band_top",
+                    "band_bottom",
+                    "words",
+                ]
+            )
+            return self._lines_df.copy()
+
+        line_records: list[dict[str, Any]] = []
+
+        for page_number, page_words in words_df.groupby(
+            "page_number",
+            sort=True,
+        ):
+            ordered = page_words.sort_values(
+                ["top", "x0"],
+                kind="stable",
+            )
+
+            groups: list[list[dict[str, Any]]] = []
+
+            for record in ordered.to_dict("records"):
+                if not groups:
+                    groups.append([record])
                     continue
 
-                if abs(word_top - current_top) <= y_tolerance:
-                    current_words.append(word.to_dict())
+                current = groups[-1]
+                mean_top = sum(
+                    float(item["top"])
+                    for item in current
+                ) / len(current)
+
+                same_visual_band = (
+                    record.get("band_id")
+                    == current[0].get("band_id")
+                )
+
+                if (
+                    abs(float(record["top"]) - mean_top)
+                    <= self.line_tolerance
+                    and same_visual_band
+                ):
+                    current.append(record)
                 else:
-                    current_words = sorted(current_words, key=lambda x: x["x0"])
-                    lines.append({
-                        "page": page,
-                        "top": current_top,
-                        "text": " ".join(w["text"] for w in current_words),
-                        "words": current_words,
-                    })
+                    groups.append([record])
 
-                    current_top = word_top
-                    current_words = [word.to_dict()]
+            for line_number, group in enumerate(
+                groups,
+                start=1,
+            ):
+                group = sorted(
+                    group,
+                    key=lambda item: float(item["x0"]),
+                )
 
-            if current_words:
-                current_words = sorted(current_words, key=lambda x: x["x0"])
-                lines.append({
-                    "page": page,
-                    "top": current_top,
-                    "text": " ".join(w["text"] for w in current_words),
-                    "words": current_words,
-                })
+                text = self._clean_text(
+                    " ".join(
+                        str(item["text"])
+                        for item in group
+                    )
+                )
 
-        return pd.DataFrame(lines)
+                first = group[0]
 
-    def export_line_words(self, writer) -> None:
+                line_records.append(
+                    {
+                        "page_number": int(page_number),
+                        "line_number": line_number,
+                        "text": text,
+                        "x0": min(
+                            float(item["x0"])
+                            for item in group
+                        ),
+                        "x1": max(
+                            float(item["x1"])
+                            for item in group
+                        ),
+                        "top": min(
+                            float(item["top"])
+                            for item in group
+                        ),
+                        "bottom": max(
+                            float(item["bottom"])
+                            for item in group
+                        ),
+                        "band_id": first.get("band_id"),
+                        "shade": first.get("shade"),
+                        "band_top": first.get("band_top"),
+                        "band_bottom": first.get("band_bottom"),
+                        "words": group,
+                    }
+                )
+
+        self._lines_df = pd.DataFrame(line_records)
+        return self._lines_df.copy()
+
+    def visual_bands(self) -> pd.DataFrame:
+        if not self._bands_by_page:
+            self.extract_words()
+
+        rows = [
+            band
+            for page_bands in self._bands_by_page.values()
+            for band in page_bands
+        ]
+        return pd.DataFrame(rows)
+
+    def group_visual_blocks(self) -> pd.DataFrame:
+        """
+        Aggregate grouped text lines by visual band.
+
+        Useful for debugging how OPERA's alternating row colors divide
+        reservations and observations.
+        """
         lines = self.group_lines()
 
-        rows = []
+        if lines.empty:
+            return pd.DataFrame()
+
+        blocks: list[dict[str, Any]] = []
+
+        for (
+            page_number,
+            band_id,
+            shade,
+        ), group in lines.groupby(
+            ["page_number", "band_id", "shade"],
+            dropna=False,
+            sort=True,
+        ):
+            group = group.sort_values(
+                ["top", "x0"],
+                kind="stable",
+            )
+
+            blocks.append(
+                {
+                    "page_number": page_number,
+                    "band_id": band_id,
+                    "shade": shade,
+                    "band_top": group["band_top"].min(),
+                    "band_bottom": group["band_bottom"].max(),
+                    "line_count": len(group),
+                    "text": "\n".join(
+                        group["text"].astype(str)
+                    ),
+                    "lines": group.to_dict("records"),
+                }
+            )
+
+        return pd.DataFrame(blocks)
+
+    def export_line_words(
+        self,
+        writer: pd.ExcelWriter,
+    ) -> None:
+        lines = self.group_lines()
+
+        if lines.empty:
+            return
+
+        export_rows: list[dict[str, Any]] = []
 
         for _, line in lines.iterrows():
-            for word in line["words"]:
-                rows.append({
-                    "page": line["page"],
-                    "line_top": line["top"],
-                    "line_text": line["text"],
-                    "word_text": word["text"],
-                    "x0": word["x0"],
-                    "x1": word["x1"],
-                    "top": word["top"],
-                    "bottom": word["bottom"],
-                })
+            for word_order, word in enumerate(
+                line["words"],
+                start=1,
+            ):
+                export_rows.append(
+                    {
+                        "page_number": line["page_number"],
+                        "line_number": line["line_number"],
+                        "band_id": line.get("band_id"),
+                        "shade": line.get("shade"),
+                        "line_text": line["text"],
+                        "word_order": word_order,
+                        "word_text": word.get("text"),
+                        "x0": word.get("x0"),
+                        "x1": word.get("x1"),
+                        "top": word.get("top"),
+                        "bottom": word.get("bottom"),
+                    }
+                )
 
-        pd.DataFrame(rows).to_excel(writer, sheet_name="line_words", index=False)
+        pd.DataFrame(export_rows).to_excel(
+            writer,
+            sheet_name="line_words",
+            index=False,
+        )

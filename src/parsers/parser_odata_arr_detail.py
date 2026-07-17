@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from datetime import datetime
+from typing import Any
 import re
 
 import pandas as pd
@@ -35,7 +36,20 @@ KNOWN_VIP_CODES = {
     "CT",
 }
 
-SECTION_STOP_MARKERS = (
+SECTION_LABELS = {
+    "Share with:": "share_with",
+    "Accompanying Names:": "accompanying_names",
+    "Observations:": "observations",
+    "Observation:": "observations",
+    "Notes:": "observations",
+    "Note:": "observations",
+    "Comments:": "observations",
+    "Comment:": "observations",
+    "Remarks:": "observations",
+    "Remark:": "observations",
+}
+
+HARD_STOP_MARKERS = (
     "Filter Arrival",
     "Room Class",
     "Room Types",
@@ -51,18 +65,31 @@ SECTION_STOP_MARKERS = (
     "Sandy Lane",
     "ODATA_arr_detail",
     "Page ",
-    "Arrival Date",
     "Arrival Date Total",
     "Grand Total",
-    "Room #",
-    "Stays Nts.",
+)
+
+COLUMN_HEADER_MARKERS = (
+    "Room Name",
+    "Name Company",
+    "Room Type",
+    "Mkt. Code",
+    "Src. Code",
+    "Res. Status",
+    "Block Code",
+    "Arr. Time",
+    "Carr. Code",
+    "Travel Agent",
+    "Conf No.",
+    "ETD C/H",
     "Prev. Stays",
     "Prev. Nts.",
-    "ETD C/H",
+    "Last Room",
+    "Method of Arrival",
 )
 
 
-def clean_text(value) -> str:
+def clean_text(value: Any) -> str:
     if value is None:
         return ""
 
@@ -72,18 +99,15 @@ def clean_text(value) -> str:
     except (TypeError, ValueError):
         pass
 
-    value = str(value).strip()
-    value = value.replace("\ufffe", "")
+    value = str(value).replace("\ufffe", "").strip()
 
     if value.startswith("*"):
         value = value[1:]
 
-    value = re.sub(r"\s+", " ", value)
-
-    return value.strip()
+    return re.sub(r"\s+", " ", value).strip()
 
 
-def clean_guest_name(value: str) -> str:
+def clean_guest_name(value: Any) -> str:
     value = clean_text(value)
 
     value = re.split(
@@ -95,7 +119,7 @@ def clean_guest_name(value: str) -> str:
     return value.strip()
 
 
-def to_iso_date(value: str) -> str | None:
+def to_iso_date(value: Any) -> str | None:
     value = clean_text(value)
 
     if not value:
@@ -110,7 +134,7 @@ def to_iso_date(value: str) -> str | None:
         return None
 
 
-def to_int(value):
+def to_int(value: Any):
     value = clean_text(value)
 
     if not value:
@@ -122,38 +146,41 @@ def to_int(value):
         return None
 
 
-def is_noise(text: str) -> bool:
-    noise = (
-        "Filter Arrival",
-        "Room Class",
-        "Market Code All",
-        "From Arrival Time",
-        "Room Assignment",
-        "Sort Order",
-        "Sandy Lane",
-        "ODATA_arr_detail",
-        "Page ",
+def is_hard_stop(text: str) -> bool:
+    text = clean_text(text)
+    return any(marker in text for marker in HARD_STOP_MARKERS)
+
+
+def is_column_header(text: str) -> bool:
+    text = clean_text(text)
+
+    if not text:
+        return True
+
+    if text in {
         "Name",
         "Company",
-        "Room Type",
-        "Mkt.",
-        "Src.",
-        "Res.",
-        "Block Code",
-        "Arr. Time",
-        "Travel Agent",
+        "Chl.",
+        "Rms.",
+        "Adl.",
+        "VIP",
         "Source",
-        "Arr. Date",
-        "Conf No.",
-        "ETD C/H",
-        "Grand Total",
-        "Arrival Date Total",
-    )
+    }:
+        return True
 
-    return any(item in text for item in noise)
+    return any(marker in text for marker in COLUMN_HEADER_MARKERS)
 
 
-def parse_main_line(text: str) -> dict:
+def is_arrival_group_header(text: str) -> bool:
+    text = clean_text(text)
+
+    if not text.startswith("Arrival Date"):
+        return False
+
+    return bool(DATE_RE.search(text))
+
+
+def parse_main_line(text: str) -> dict[str, Any]:
     text = clean_text(text)
     dates = DATE_RE.findall(text)
 
@@ -163,30 +190,17 @@ def parse_main_line(text: str) -> dict:
     arrival_date = dates[0]
     departure_date = dates[1]
 
-    before_arrival = text.split(
-        arrival_date,
-        1,
-    )[0].strip()
-
-    after_departure = text.split(
-        departure_date,
-        1,
-    )[1].strip()
+    before_arrival = text.split(arrival_date, 1)[0].strip()
+    after_departure = text.split(departure_date, 1)[1].strip()
 
     before_tokens = before_arrival.split()
 
-    room_no = (
-        before_tokens[0]
-        if before_tokens
-        else ""
-    )
+    if not before_tokens:
+        return {}
 
-    name_company = " ".join(
-        before_tokens[1:]
-    ).strip()
-
+    room_no = before_tokens[0]
     guest_name = clean_guest_name(
-        name_company
+        " ".join(before_tokens[1:])
     )
 
     tail = after_departure.split()
@@ -206,16 +220,12 @@ def parse_main_line(text: str) -> dict:
     }
 
 
-def parse_detail_line(text: str) -> dict:
-    """
-    Interpreta la línea de detalle usando patrones y no posiciones fijas.
+def looks_like_flight(value: str) -> bool:
+    value = clean_text(value).upper().replace(" ", "")
+    return re.match(r"^[A-Z0-9]{2,}\d+$", value) is not None
 
-    Casos soportados:
-        2079408 PRE 101 12:11 BA255 VAN 4 40
-        596796710 NEW LT- OWN 0 0
-        597895914 NEW 3 12:48 PJ - YV2692 VAN 0 0
-        597895914 NEW 12:48 PJ - YV2692 VAN 0 0
-    """
+
+def parse_detail_line(text: str) -> dict[str, Any]:
     text = clean_text(text)
     tokens = text.split()
 
@@ -241,7 +251,6 @@ def parse_detail_line(text: str) -> dict:
         prev_nights = body[-1]
         body = body[:-2]
 
-    # Método de llegada.
     method_index = next(
         (
             index
@@ -257,7 +266,6 @@ def parse_detail_line(text: str) -> dict:
         else ""
     )
 
-    # Hora de llegada.
     time_index = next(
         (
             index
@@ -273,33 +281,23 @@ def parse_detail_line(text: str) -> dict:
         else ""
     )
 
-    # VIP: buscarlo al comienzo del bloque, antes de hora/método.
-    vip = ""
-    first_boundary_candidates = [
+    boundaries = [
         index
         for index in (time_index, method_index)
         if index is not None
     ]
-    first_boundary = (
-        min(first_boundary_candidates)
-        if first_boundary_candidates
-        else len(body)
-    )
+    first_boundary = min(boundaries) if boundaries else len(body)
 
     prefix = list(body[:first_boundary])
+    vip = ""
 
-    if prefix:
-        first_token = clean_text(prefix[0]).upper()
-
-        if first_token in KNOWN_VIP_CODES:
-            vip = first_token
-            prefix = prefix[1:]
+    if prefix and prefix[0].upper() in KNOWN_VIP_CODES:
+        vip = prefix.pop(0).upper()
 
     last_room = ""
     carrier_code = ""
 
     if time_index is not None:
-        # Antes de la hora solo deben quedar VIP y/o Last Room.
         if prefix:
             last_room = " ".join(prefix).strip()
 
@@ -317,38 +315,32 @@ def parse_detail_line(text: str) -> dict:
             ).strip()
 
     elif method_index is not None:
-        # Sin hora: antes del método puede venir Last Room y/o carrier.
         before_method = list(body[:method_index])
 
+        if (
+            before_method
+            and before_method[0].upper()
+            in KNOWN_VIP_CODES
+        ):
+            if not vip:
+                vip = before_method[0].upper()
+            before_method = before_method[1:]
+
         if before_method:
-            first_token = clean_text(before_method[0]).upper()
-
-            if first_token in KNOWN_VIP_CODES:
-                if not vip:
-                    vip = first_token
-                before_method = before_method[1:]
-
-        if before_method:
-            def looks_like_flight(value: str) -> bool:
-                value = clean_text(value).upper()
-                value = value.replace(" ", "")
-                return re.match(r"^[A-Z0-9]{2,}\d+$", value) is not None
-
             if len(before_method) == 1:
                 token = before_method[0]
 
                 if looks_like_flight(token):
                     carrier_code = token
-                    last_room = ""
                 else:
                     last_room = token
-
             else:
                 first = before_method[0]
 
                 if looks_like_flight(first):
-                    carrier_code = " ".join(before_method).strip()
-                    last_room = ""
+                    carrier_code = " ".join(
+                        before_method
+                    ).strip()
                 else:
                     last_room = first
                     carrier_code = " ".join(
@@ -356,16 +348,16 @@ def parse_detail_line(text: str) -> dict:
                     ).strip()
 
     else:
-        # Caso excepcional sin hora ni método.
         remaining = list(body)
 
-        if remaining:
-            first_token = clean_text(remaining[0]).upper()
-
-            if first_token in KNOWN_VIP_CODES:
-                if not vip:
-                    vip = first_token
-                remaining = remaining[1:]
+        if (
+            remaining
+            and remaining[0].upper()
+            in KNOWN_VIP_CODES
+        ):
+            if not vip:
+                vip = remaining[0].upper()
+            remaining = remaining[1:]
 
         if remaining:
             last_room = remaining[0]
@@ -387,10 +379,10 @@ def parse_detail_line(text: str) -> dict:
     }
 
 
-def append_multiline_value(
-    row: dict,
+def append_value(
+    row: dict[str, Any],
     field: str,
-    value: str,
+    value: Any,
 ) -> None:
     value = clean_text(value)
 
@@ -402,42 +394,317 @@ def append_multiline_value(
     row[field] = (
         value
         if not current
-        else clean_text(f"{current} | {value}")
+        else f"{current} | {value}"
     )
 
 
+def detect_section(text: str) -> tuple[str | None, str]:
+    for label, field in SECTION_LABELS.items():
+        if text.startswith(label):
+            return (
+                field,
+                clean_text(
+                    text.replace(label, "", 1)
+                ),
+            )
 
-def is_section_stop(text: str) -> bool:
-    text = clean_text(text)
-
-    if not text:
-        return True
-
-    if any(marker in text for marker in SECTION_STOP_MARKERS):
-        return True
-
-    if ROOM_LINE_RE.match(text) and DATE_RE.search(text):
-        return True
-
-    if DETAIL_LINE_RE.match(text):
-        return True
-
-    return False
+    return None, ""
 
 
-def looks_like_section_value(text: str) -> bool:
-    text = clean_text(text)
+def find_arrival_group_by_page(
+    lines_df: pd.DataFrame,
+) -> dict[int, list[tuple[float, str]]]:
+    """
+    Find Arrival Date group headers and their vertical positions per page.
+    """
+    groups: dict[int, list[tuple[float, str]]] = {}
 
-    if not text:
-        return False
+    for _, line in lines_df.iterrows():
+        text = clean_text(line["text"])
 
-    if is_section_stop(text):
-        return False
+        if not is_arrival_group_header(text):
+            continue
 
-    if is_noise(text):
-        return False
+        dates = DATE_RE.findall(text)
 
-    return True
+        if not dates:
+            continue
+
+        page_number = int(line["page_number"])
+        top = float(line["top"])
+
+        groups.setdefault(
+            page_number,
+            [],
+        ).append(
+            (top, dates[-1])
+        )
+
+    for page_groups in groups.values():
+        page_groups.sort(key=lambda item: item[0])
+
+    return groups
+
+
+def arrival_group_for_block(
+    page_number: int,
+    block_top: float,
+    groups_by_page: dict[int, list[tuple[float, str]]],
+) -> str:
+    candidates = groups_by_page.get(
+        page_number,
+        [],
+    )
+
+    selected = ""
+
+    for group_top, group_date in candidates:
+        if group_top <= block_top:
+            selected = group_date
+        else:
+            break
+
+    return selected
+
+
+def normalize_block_lines(
+    raw_lines: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Keep only the reservation content of a visual block.
+
+    Header/footer leakage after a reservation is cut at the first hard stop.
+    """
+    cleaned: list[dict[str, Any]] = []
+    reservation_started = False
+
+    for line in sorted(
+        raw_lines,
+        key=lambda item: (
+            float(item.get("top") or 0),
+            float(item.get("x0") or 0),
+        ),
+    ):
+        text = clean_text(line.get("text"))
+
+        if not text:
+            continue
+
+        is_main = (
+            ROOM_LINE_RE.match(text)
+            and len(DATE_RE.findall(text)) >= 2
+        )
+        is_detail = DETAIL_LINE_RE.match(text) is not None
+
+        if is_main or is_detail:
+            reservation_started = True
+
+        if reservation_started and is_hard_stop(text):
+            break
+
+        if not reservation_started:
+            if (
+                is_hard_stop(text)
+                or is_column_header(text)
+                or is_arrival_group_header(text)
+            ):
+                continue
+
+        if is_column_header(text):
+            continue
+
+        cleaned.append(
+            {
+                **line,
+                "text": text,
+            }
+        )
+
+    return cleaned
+
+
+def parse_sections_and_observations(
+    lines: list[dict[str, Any]],
+    excluded_indexes: set[int],
+) -> dict[str, str]:
+    result = {
+        "share_with": "",
+        "accompanying_names": "",
+        "observations": "",
+    }
+
+    active_section: str | None = None
+
+    for index, line in enumerate(lines):
+        if index in excluded_indexes:
+            active_section = None
+            continue
+
+        text = clean_text(line["text"])
+
+        if not text:
+            continue
+
+        section, inline_value = detect_section(text)
+
+        if section:
+            active_section = section
+
+            if inline_value:
+                append_value(
+                    result,
+                    section,
+                    inline_value,
+                )
+
+            continue
+
+        if (
+            is_hard_stop(text)
+            or is_column_header(text)
+            or is_arrival_group_header(text)
+        ):
+            active_section = None
+            continue
+
+        if active_section:
+            append_value(
+                result,
+                active_section,
+                text,
+            )
+        else:
+            # Preserve any unlabelled content in the reservation block.
+            append_value(
+                result,
+                "observations",
+                text,
+            )
+
+    return result
+
+
+def parse_visual_block(
+    block: pd.Series,
+    arrival_group_date: str,
+    source_file: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    raw_lines = block.get("lines") or []
+    lines = normalize_block_lines(raw_lines)
+
+    debug = {
+        "page_number": block.get("page_number"),
+        "band_id": block.get("band_id"),
+        "shade": block.get("shade"),
+        "band_top": block.get("band_top"),
+        "band_bottom": block.get("band_bottom"),
+        "line_count": len(lines),
+        "main_found": False,
+        "detail_found": False,
+        "parsed": False,
+        "reason": "",
+        "normalized_text": "\n".join(
+            clean_text(line.get("text"))
+            for line in lines
+        ),
+    }
+
+    if not lines:
+        debug["reason"] = "empty_block"
+        return None, debug
+
+    main_index = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if (
+                ROOM_LINE_RE.match(line["text"])
+                and len(DATE_RE.findall(line["text"])) >= 2
+            )
+        ),
+        None,
+    )
+
+    detail_index = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if DETAIL_LINE_RE.match(line["text"])
+        ),
+        None,
+    )
+
+    debug["main_found"] = main_index is not None
+    debug["detail_found"] = detail_index is not None
+
+    if main_index is None:
+        debug["reason"] = "main_not_found"
+        return None, debug
+
+    if detail_index is None:
+        debug["reason"] = "detail_not_found"
+        return None, debug
+
+    main = parse_main_line(
+        lines[main_index]["text"]
+    )
+    detail = parse_detail_line(
+        lines[detail_index]["text"]
+    )
+
+    if not main:
+        debug["reason"] = "main_parse_failed"
+        return None, debug
+
+    if not detail:
+        debug["reason"] = "detail_parse_failed"
+        return None, debug
+
+    sections = parse_sections_and_observations(
+        lines,
+        excluded_indexes={
+            main_index,
+            detail_index,
+        },
+    )
+
+    row = {
+        **main,
+        **detail,
+        **sections,
+        "arrival_group_date": arrival_group_date,
+        "visual_band_id": clean_text(
+            block.get("band_id")
+        ),
+        "visual_shade": clean_text(
+            block.get("shade")
+        ),
+        "visual_page_number": block.get(
+            "page_number"
+        ),
+        "visual_band_top": block.get(
+            "band_top"
+        ),
+        "visual_band_bottom": block.get(
+            "band_bottom"
+        ),
+        "source_report": REPORT_NAME,
+        "source_file": source_file,
+    }
+
+    debug["parsed"] = True
+    debug["reason"] = "success"
+    debug["confirmation_no"] = detail.get(
+        "confirmation_no"
+    )
+    debug["guest_name"] = main.get(
+        "guest_name"
+    )
+    debug["room_no"] = main.get(
+        "room_no"
+    )
+
+    return row, debug
 
 
 def parse_odata_arr_detail(
@@ -447,127 +714,37 @@ def parse_odata_arr_detail(
     engine = PdfEngine(pdf_path)
 
     lines_df = engine.group_lines()
+    blocks_df = engine.group_visual_blocks()
 
-    rows: list[dict] = []
-    pending_main: dict | None = None
-    current_row: dict | None = None
+    groups_by_page = find_arrival_group_by_page(
+        lines_df
+    )
 
-    current_arrival_group = ""
-    section_mode: str | None = None
+    rows: list[dict[str, Any]] = []
 
-    for _, row in lines_df.iterrows():
-        text = clean_text(row["text"])
+    for _, block in blocks_df.sort_values(
+        ["page_number", "band_top"],
+        kind="stable",
+    ).iterrows():
+        page_number = int(block["page_number"])
+        block_top = float(
+            block.get("band_top") or 0
+        )
 
-        if not text:
-            continue
+        arrival_group_date = arrival_group_for_block(
+            page_number,
+            block_top,
+            groups_by_page,
+        )
 
-        if text.startswith("Arrival Date"):
-            dates = DATE_RE.findall(text)
+        parsed, _ = parse_visual_block(
+            block,
+            arrival_group_date,
+            pdf_path.name,
+        )
 
-            if dates:
-                current_arrival_group = dates[-1]
-
-            section_mode = None
-            continue
-
-        if text.startswith("Share with:"):
-            section_mode = "share_with"
-
-            inline_value = clean_text(
-                text.replace(
-                    "Share with:",
-                    "",
-                    1,
-                )
-            )
-
-            if current_row and inline_value:
-                append_multiline_value(
-                    current_row,
-                    "share_with",
-                    inline_value,
-                )
-
-            continue
-
-        if text.startswith("Accompanying Names:"):
-            section_mode = "accompanying_names"
-
-            inline_value = clean_text(
-                text.replace(
-                    "Accompanying Names:",
-                    "",
-                    1,
-                )
-            )
-
-            if current_row and inline_value:
-                append_multiline_value(
-                    current_row,
-                    "accompanying_names",
-                    inline_value,
-                )
-
-            continue
-
-        if (
-            ROOM_LINE_RE.match(text)
-            and DATE_RE.search(text)
-        ):
-            parsed_main = parse_main_line(text)
-
-            if parsed_main:
-                pending_main = parsed_main
-                pending_main["arrival_group_date"] = (
-                    current_arrival_group
-                )
-
-            section_mode = None
-            continue
-
-        if (
-            pending_main
-            and DETAIL_LINE_RE.match(text)
-        ):
-            detail = parse_detail_line(text)
-
-            if detail:
-                current_row = {
-                    **pending_main,
-                    **detail,
-                    "share_with": "",
-                    "accompanying_names": "",
-                    "source_report": REPORT_NAME,
-                    "source_file": pdf_path.name,
-                }
-
-                rows.append(current_row)
-
-            pending_main = None
-            section_mode = None
-            continue
-
-        if is_section_stop(text):
-            section_mode = None
-
-            if is_noise(text):
-                continue
-
-        if is_noise(text):
-            section_mode = None
-            continue
-
-        if (
-            current_row
-            and section_mode
-            and looks_like_section_value(text)
-        ):
-            append_multiline_value(
-                current_row,
-                section_mode,
-                text,
-            )
-            continue
+        if parsed:
+            rows.append(parsed)
 
     df = pd.DataFrame(rows)
 
@@ -610,29 +787,30 @@ def parse_odata_arr_detail(
         "method_of_arrival",
         "share_with",
         "accompanying_names",
+        "observations",
+        "visual_band_id",
+        "visual_shade",
     ]
 
-    for col in text_columns:
-        if col in df.columns:
-            df[col] = (
-                df[col]
+    for column in text_columns:
+        if column in df.columns:
+            df[column] = (
+                df[column]
                 .fillna("")
                 .apply(clean_text)
             )
 
-    date_columns = [
+    for column in [
         "arrival_date",
         "departure_date",
         "arrival_group_date",
-    ]
-
-    for col in date_columns:
-        if col in df.columns:
-            df[col] = df[col].apply(
+    ]:
+        if column in df.columns:
+            df[column] = df[column].apply(
                 to_iso_date
             )
 
-    int_columns = [
+    for column in [
         "room_no",
         "adults",
         "children",
@@ -640,11 +818,10 @@ def parse_odata_arr_detail(
         "confirmation_no",
         "prev_stays",
         "prev_nights",
-    ]
-
-    for col in int_columns:
-        if col in df.columns:
-            df[col] = df[col].apply(
+        "visual_page_number",
+    ]:
+        if column in df.columns:
+            df[column] = df[column].apply(
                 to_int
             )
 
@@ -671,24 +848,74 @@ def parse_odata_arr_detail(
         "prev_nights",
         "share_with",
         "accompanying_names",
+        "observations",
+        "visual_band_id",
+        "visual_shade",
+        "visual_page_number",
+        "visual_band_top",
+        "visual_band_bottom",
         "source_report",
         "source_file",
     ]
 
     return df[
         [
-            col
-            for col in final_columns
-            if col in df.columns
+            column
+            for column in final_columns
+            if column in df.columns
         ]
     ]
+
+
+def build_block_debug(
+    pdf_path: str | Path,
+) -> pd.DataFrame:
+    pdf_path = Path(pdf_path)
+    engine = PdfEngine(pdf_path)
+
+    lines_df = engine.group_lines()
+    blocks_df = engine.group_visual_blocks()
+
+    groups_by_page = find_arrival_group_by_page(
+        lines_df
+    )
+
+    debug_rows: list[dict[str, Any]] = []
+
+    for _, block in blocks_df.sort_values(
+        ["page_number", "band_top"],
+        kind="stable",
+    ).iterrows():
+        page_number = int(block["page_number"])
+        block_top = float(
+            block.get("band_top") or 0
+        )
+
+        arrival_group_date = arrival_group_for_block(
+            page_number,
+            block_top,
+            groups_by_page,
+        )
+
+        _, debug = parse_visual_block(
+            block,
+            arrival_group_date,
+            pdf_path.name,
+        )
+
+        debug["arrival_group_date"] = (
+            arrival_group_date
+        )
+        debug_rows.append(debug)
+
+    return pd.DataFrame(debug_rows)
 
 
 def export_debug(
     pdf_path: str | Path,
     output_path: str | Path = (
         "data/debug/ODATA_arr_detail/"
-        "odata_arr_detail_debug.xlsx"
+        "odata_arr_detail_v4_debug.xlsx"
     ),
 ) -> Path:
     pdf_path = Path(pdf_path)
@@ -703,9 +930,10 @@ def export_debug(
 
     words = engine.extract_words()
     lines = engine.group_lines()
-    parsed = parse_odata_arr_detail(
-        pdf_path
-    )
+    bands = engine.visual_bands()
+    blocks = engine.group_visual_blocks()
+    block_debug = build_block_debug(pdf_path)
+    parsed = parse_odata_arr_detail(pdf_path)
 
     with pd.ExcelWriter(
         output_path,
@@ -726,6 +954,27 @@ def export_debug(
             index=False,
         )
 
+        bands.to_excel(
+            writer,
+            sheet_name="visual_bands",
+            index=False,
+        )
+
+        blocks.drop(
+            columns=["lines"],
+            errors="ignore",
+        ).to_excel(
+            writer,
+            sheet_name="visual_blocks",
+            index=False,
+        )
+
+        block_debug.to_excel(
+            writer,
+            sheet_name="block_debug",
+            index=False,
+        )
+
         engine.export_line_words(writer)
 
         parsed.to_excel(
@@ -743,19 +992,16 @@ if __name__ == "__main__":
             "ODATA_arr_detail*.pdf"
         )
     )
-
     files += list(
         Path("data/incoming").glob(
             "ODATA_arr_detail*.PDF"
         )
     )
-
     files += list(
         Path("data/incoming").glob(
             "odata_arr_detail*.pdf"
         )
     )
-
     files += list(
         Path("data/incoming").glob(
             "odata_arr_detail*.PDF"
@@ -773,9 +1019,9 @@ if __name__ == "__main__":
 
     print(f"Using: {pdf.name}")
 
-    out = export_debug(pdf)
+    output = export_debug(pdf)
 
     print(
         f"Debug exported: "
-        f"{out.resolve()}"
+        f"{output.resolve()}"
     )
