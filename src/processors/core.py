@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from .utils import read_standard_csv, clean_col
-from ..parsers.parser_odata_arr_detail import parse_odata_arr_detail
+from ..parsers.arrival_parser_v2 import parse_odata_arr_detail_v2
 from ..parsers.parser_odata_departures_all import parse_odata_departures_all
 from ..parsers.parser_odata_forecast import parse_odata_forecast
 from ..parsers.parser_odata_transportation import parse_odata_transportation
@@ -78,7 +78,7 @@ def process_file(path: Path) -> tuple[str, pd.DataFrame]:
     if path.suffix.lower() == ".pdf":
 
         if path.stem.upper().startswith("ODATA_ARR_DETAIL"):
-            df = parse_odata_arr_detail(path)
+            df = df = parse_odata_arr_detail_v2(path)
             return "odata_arr_detail", df
 
         if path.stem.upper().startswith("ODATA_DEPARTURES_ALL"):
