@@ -13,11 +13,12 @@ visual grouping remain in ``src.core.pdf``.
 from datetime import datetime
 from pathlib import Path
 import re
+import time
 from typing import Any, Iterable, Mapping, Sequence
 
 import pandas as pd
 
-from src.core.pdf.pdf_engine import PdfEngine
+from src.core.pdf.pdf_engine import PdfEngine, PdfEngineError
 from src.core.pdf.reservation_block_builder import ReservationBlockBuilder
 
 
@@ -71,6 +72,105 @@ FINAL_COLUMNS = [
     "source_report",
     "source_file",
 ]
+
+
+class InvalidPdfError(RuntimeError):
+    """Raised when the input file is missing, incomplete or not a valid PDF."""
+
+
+def _wait_until_file_stable(
+    path: Path,
+    *,
+    checks: int = 5,
+    interval_seconds: float = 1.0,
+) -> None:
+    """Wait until the PDF size remains unchanged between consecutive checks."""
+    if not path.exists():
+        raise FileNotFoundError(f"PDF not found: {path}")
+
+    previous_size: int | None = None
+
+    for _ in range(max(1, checks)):
+        current_size = path.stat().st_size
+
+        if previous_size is not None and current_size == previous_size:
+            return
+
+        previous_size = current_size
+        time.sleep(max(0.0, interval_seconds))
+
+
+def _validate_pdf(path: Path) -> None:
+    """Perform inexpensive structural checks before invoking the PDF engine."""
+    if not path.exists():
+        raise FileNotFoundError(f"PDF not found: {path}")
+
+    if not path.is_file():
+        raise InvalidPdfError(f"PDF path is not a file: {path}")
+
+    file_size = path.stat().st_size
+
+    if file_size == 0:
+        raise InvalidPdfError(f"Empty PDF: {path.name}")
+
+    with path.open("rb") as pdf_file:
+        header = pdf_file.read(5)
+
+        if header != b"%PDF-":
+            raise InvalidPdfError(
+                f"Invalid PDF header in {path.name}"
+            )
+
+        tail_size = min(file_size, 8192)
+        pdf_file.seek(-tail_size, 2)
+        tail = pdf_file.read(tail_size)
+
+    if b"%%EOF" not in tail:
+        raise InvalidPdfError(
+            f"PDF appears truncated (missing %%EOF): "
+            f"{path.name} ({file_size} bytes)"
+        )
+
+
+def _build_reservation_blocks_with_retry(
+    path: Path,
+    *,
+    strict: bool,
+    attempts: int = 3,
+    retry_delay_seconds: float = 5.0,
+) -> tuple[PdfEngine, ReservationBlockBuilder, list[Any]]:
+    """Open and interpret the PDF, retrying temporary engine failures."""
+    last_error: Exception | None = None
+
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            _wait_until_file_stable(path)
+            _validate_pdf(path)
+
+            engine = PdfEngine(path)
+            builder = ReservationBlockBuilder(strict=strict)
+            blocks = list(builder.build_from_engine(engine))
+
+            return engine, builder, blocks
+
+        except InvalidPdfError:
+            raise
+
+        except PdfEngineError as exc:
+            last_error = exc
+
+            print(
+                f"[ARRIVAL] {path.name} | "
+                f"attempt {attempt}/{attempts} failed | {exc}"
+            )
+
+            if attempt < attempts:
+                time.sleep(max(0.0, retry_delay_seconds))
+
+    raise PdfEngineError(
+        f"Could not parse {path.name} after {attempts} attempts: "
+        f"{last_error}"
+    ) from last_error
 
 
 class ArrivalParserError(RuntimeError):
@@ -499,13 +599,18 @@ def parse_odata_arr_detail_v2(
     pdf_path: str | Path,
     *,
     strict: bool = False,
+    attempts: int = 3,
+    retry_delay_seconds: float = 5.0,
 ) -> pd.DataFrame:
-    """Parse one ODATA Arrivals Detail PDF with the new pipeline."""
+    """Parse one ODATA Arrivals Detail PDF with validation and retries."""
     path = Path(pdf_path)
 
-    engine = PdfEngine(path)
-    builder = ReservationBlockBuilder(strict=strict)
-    blocks = builder.build_from_engine(engine)
+    _, _, blocks = _build_reservation_blocks_with_retry(
+        path,
+        strict=strict,
+        attempts=attempts,
+        retry_delay_seconds=retry_delay_seconds,
+    )
 
     parser = ArrivalParserV2(strict=strict)
     return parser.parse_blocks(
@@ -527,9 +632,12 @@ def export_debug_v2(
     path = Path(pdf_path)
     destination = Path(output_path)
 
-    engine = PdfEngine(path)
-    builder = ReservationBlockBuilder(strict=strict)
-    reservation_blocks = builder.build_from_engine(engine)
+    engine, builder, reservation_blocks = (
+        _build_reservation_blocks_with_retry(
+            path,
+            strict=strict,
+        )
+    )
 
     parser = ArrivalParserV2(strict=strict)
     parsed = parser.parse_blocks(
