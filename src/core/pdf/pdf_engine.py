@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import pandas as pd
-import pdfplumber
+import fitz
 
 from src.core.pdf.debug_exporter import DebugExporter
 from src.core.pdf.models import Band, Block, Line, Word
@@ -181,22 +181,23 @@ class PdfEngine:
 
     def _detect_gray_rectangles(
         self,
-        page: pdfplumber.page.Page,
+        page: fitz.Page,
         page_number: int,
     ) -> list[dict[str, Any]]:
+        """Detect OPERA's wide light-gray row backgrounds with PyMuPDF."""
         rectangles: list[dict[str, Any]] = []
 
-        for rect in page.rects:
-            width = float(rect.get("width") or 0.0)
-            height = float(rect.get("height") or 0.0)
-            brightness = self._color_to_brightness(
-                rect.get("non_stroking_color")
-            )
+        for drawing in page.get_drawings():
+            fill = drawing.get("fill")
+            brightness = self._color_to_brightness(fill)
+            rect = drawing.get("rect")
 
-            if brightness is None:
+            if brightness is None or rect is None:
                 continue
 
-            is_wide = width >= float(page.width) * self.min_band_width_ratio
+            width = float(rect.width)
+            height = float(rect.height)
+            is_wide = width >= float(page.rect.width) * self.min_band_width_ratio
             is_tall_enough = height >= self.min_band_height
             is_expected_gray = (
                 abs(brightness - self.gray_brightness) <= self.gray_tolerance
@@ -208,10 +209,10 @@ class PdfEngine:
             rectangles.append(
                 {
                     "page_number": page_number,
-                    "top": float(rect["top"]),
-                    "bottom": float(rect["bottom"]),
-                    "x0": float(rect["x0"]),
-                    "x1": float(rect["x1"]),
+                    "top": float(rect.y0),
+                    "bottom": float(rect.y1),
+                    "x0": float(rect.x0),
+                    "x1": float(rect.x1),
                     "brightness": brightness,
                     "shade": "gray",
                 }
@@ -324,68 +325,75 @@ class PdfEngine:
     # ------------------------------------------------------------------
 
     def extract_words(self, force: bool = False) -> pd.DataFrame:
-        """Extract words and attach generic visual-band metadata."""
+        """Extract words with PyMuPDF and attach visual-band metadata."""
         if self._words_df is not None and not force:
             return self._words_df.copy(deep=True)
 
         self._validate_source()
         records: list[dict[str, Any]] = []
         band_records: list[dict[str, Any]] = []
+        document: fitz.Document | None = None
 
         try:
-            with pdfplumber.open(self.pdf_path) as pdf:
-                for page_number, page in enumerate(pdf.pages, start=1):
-                    gray_rectangles = self._detect_gray_rectangles(
-                        page, page_number
+            document = fitz.open(self.pdf_path)
+            doctop_offset = 0.0
+
+            for page_number, page in enumerate(document, start=1):
+                page_height = float(page.rect.height)
+                gray_rectangles = self._detect_gray_rectangles(
+                    page, page_number
+                )
+                page_bands = self._build_page_bands(
+                    page_number,
+                    page_height,
+                    gray_rectangles,
+                )
+                band_records.extend(page_bands)
+
+                # Tuple: x0, y0, x1, y1, text, block_no, line_no, word_no
+                words = page.get_text("words", sort=True)
+
+                for word_index, raw in enumerate(words, start=1):
+                    x0, top, x1, bottom, raw_text = raw[:5]
+                    text = self._clean_text(raw_text)
+                    if not text:
+                        continue
+
+                    x0 = float(x0)
+                    x1 = float(x1)
+                    top = float(top)
+                    bottom = float(bottom)
+                    center_y = (top + bottom) / 2.0
+                    band = self._find_band(center_y, page_bands)
+
+                    records.append(
+                        {
+                            "page_number": page_number,
+                            "word_index": word_index,
+                            "text": text,
+                            "x0": x0,
+                            "x1": x1,
+                            "top": top,
+                            "bottom": bottom,
+                            "doctop": doctop_offset + top,
+                            "width": x1 - x0,
+                            "height": bottom - top,
+                            "band_id": band["band_id"] if band else None,
+                            "shade": band["shade"] if band else "unknown",
+                            "band_top": band["top"] if band else None,
+                            "band_bottom": band["bottom"] if band else None,
+                        }
                     )
-                    page_bands = self._build_page_bands(
-                        page_number,
-                        float(page.height),
-                        gray_rectangles,
-                    )
-                    band_records.extend(page_bands)
 
-                    words = page.extract_words(
-                        x_tolerance=1,
-                        y_tolerance=2,
-                        keep_blank_chars=False,
-                        use_text_flow=False,
-                    )
+                doctop_offset += page_height
 
-                    for word_index, raw in enumerate(words, start=1):
-                        text = self._clean_text(raw.get("text"))
-                        if not text:
-                            continue
-
-                        top = float(raw["top"])
-                        bottom = float(raw["bottom"])
-                        center_y = (top + bottom) / 2.0
-                        band = self._find_band(center_y, page_bands)
-
-                        records.append(
-                            {
-                                "page_number": page_number,
-                                "word_index": word_index,
-                                "text": text,
-                                "x0": float(raw["x0"]),
-                                "x1": float(raw["x1"]),
-                                "top": top,
-                                "bottom": bottom,
-                                "doctop": float(raw.get("doctop", top)),
-                                "width": float(
-                                    raw.get("width", float(raw["x1"]) - float(raw["x0"]))
-                                ),
-                                "height": float(raw.get("height", bottom - top)),
-                                "band_id": band["band_id"] if band else None,
-                                "shade": band["shade"] if band else "unknown",
-                                "band_top": band["top"] if band else None,
-                                "band_bottom": band["bottom"] if band else None,
-                            }
-                        )
         except Exception as exc:
             raise PdfEngineError(
                 f"Could not extract PDF words from {self.pdf_path}: {exc}"
             ) from exc
+        finally:
+            if document is not None:
+                document.close()
 
         self._words_df = pd.DataFrame(records, columns=self.WORD_COLUMNS)
         self._bands_df = pd.DataFrame(band_records, columns=self.BAND_COLUMNS)
