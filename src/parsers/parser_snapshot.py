@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 import re
 
 import pandas as pd
@@ -11,26 +11,61 @@ import pdfplumber
 REPORT_NAME = "snapshot"
 TARGET_TABLE = "snapshot"
 
+DATE_RE = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}$")
 
-DATE_RE = re.compile(
-    r"^\d{1,2}/\d{1,2}/\d{4}$"
-)
 
-CONFIRMATION_RE = re.compile(
-    r"^\d{6,}$"
-)
+# Fixed horizontal positions of the OPERA Snapshot report.
+# The new fields were added at the end of the report:
+# UDFD01 | First Name | Last Name | VIP Code
+COLUMN_RANGES = {
+    "adults": (50, 95),
+    "children": (95, 128),
+    "child_bucket_1": (128, 161),
+    "child_bucket_2": (161, 194),
+    "child_bucket_3": (194, 222),
+    "reservation_status": (222, 274),
+    "confirmation_number": (274, 330),
+    "stay_date": (330, 377),
+    "room_type": (377, 406),
+    "room_no": (406, 435),
+    "children_ages": (435, 488),
+    "source_code": (488, 522),
+    "rate_code": (522, 577),
+    "anniversary_date": (577, 624),
+    "first_name": (624, 683),
+    "last_name": (683, 752),
+    "vip_code": (752, 800),
+}
 
-SOURCE_CODE_RE = re.compile(
-    r"^[A-Za-z][A-Za-z0-9_./-]*$"
-)
 
-CHILDREN_AGES_RE = re.compile(
-    r"^\d+(?:-\d+)*$"
-)
+FINAL_COLUMNS = [
+    "confirmation_number",
+    "reservation_status",
+    "stay_date",
+    "adults",
+    "children",
+    "child_bucket_1",
+    "child_bucket_2",
+    "child_bucket_3",
+    "room_type",
+    "room_no",
+    "children_ages",
+    "source_code",
+    "rate_code",
+    "anniversary_date",
+    "first_name",
+    "last_name",
+    "vip_code",
+    "source_report",
+    "source_file",
+]
 
 
 def clean_text(value) -> str:
-    value = str(value or "").strip()
+    if value is None:
+        return ""
+
+    value = str(value).replace("\n", " ").strip()
     value = re.sub(r"\s+", " ", value)
     return value.strip()
 
@@ -47,273 +82,207 @@ def to_int(value):
         return None
 
 
-def to_iso_date(value: str) -> str | None:
+def detect_date_format(values: list[str]) -> str:
+    """
+    Detect DD/MM/YYYY versus MM/DD/YYYY from unambiguous dates.
+
+    Current report:
+        17/07/2026 -> DD/MM/YYYY
+
+    Previous report:
+        7/17/2026 -> MM/DD/YYYY
+    """
+    for value in values:
+        match = re.search(r"\d{1,2}/\d{1,2}/\d{4}", clean_text(value))
+
+        if not match:
+            continue
+
+        first, second, _ = match.group(0).split("/")
+
+        if int(first) > 12:
+            return "%d/%m/%Y"
+
+        if int(second) > 12:
+            return "%m/%d/%Y"
+
+    return "%d/%m/%Y"
+
+
+def to_iso_date(value: str, preferred_format: str) -> str | None:
     value = clean_text(value)
 
     if not value:
         return None
 
-    try:
-        return datetime.strptime(
-            value,
-            "%m/%d/%Y",
-        ).date().isoformat()
+    # UDFD01 includes a time under the date, for example:
+    # 07/09/1974 0:00:00
+    match = re.search(r"\d{1,2}/\d{1,2}/\d{4}", value)
 
-    except Exception:
+    if not match:
         return None
 
+    date_value = match.group(0)
 
-def is_noise(text: str) -> bool:
-    text = clean_text(text)
+    formats = [preferred_format]
 
-    return (
-        not text
-        or text.lower() == "snapshot"
-        or text.startswith("Adults Children")
-        or text.startswith("Child Bucket")
-        or text.startswith("Reservation Status")
-        or text.startswith("Confirmation Number")
-        or text.startswith("Source Code")
-        or text.startswith("Rate Code")
-        or text.startswith("Stay Date")
-        or text.startswith("Room Type")
-        or text.startswith("Room Children")
-        or text in {
-            "Adults",
-            "Children",
-            "Child",
-            "Bucket",
-            "Reservation",
-            "Status",
-            "Confirmation",
-            "Number",
-            "Stay",
-            "Date",
-            "Room",
-            "Type",
-            "Ages",
-            "Source",
-            "Code",
-            "Rate",
-            "IN",
-        }
-    )
+    for fallback in ("%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%d"):
+        if fallback not in formats:
+            formats.append(fallback)
 
-
-def find_date_index(tokens: list[str]) -> int | None:
-    for index, token in enumerate(tokens):
-        if DATE_RE.fullmatch(token):
-            return index
+    for fmt in formats:
+        try:
+            return datetime.strptime(date_value, fmt).date().isoformat()
+        except ValueError:
+            continue
 
     return None
 
 
-def parse_line(text: str) -> dict | None:
+def words_in_range(
+    words: list[dict],
+    x_min: float,
+    x_max: float,
+    top_min: float,
+    top_max: float,
+) -> str:
+    selected = [
+        word
+        for word in words
+        if x_min <= float(word["x0"]) < x_max
+        and top_min <= float(word["top"]) < top_max
+    ]
+
+    selected.sort(
+        key=lambda word: (
+            round(float(word["top"]), 1),
+            float(word["x0"]),
+        )
+    )
+
+    return clean_text(
+        " ".join(str(word["text"]) for word in selected)
+    )
+
+
+def extract_page_rows(page) -> list[dict]:
     """
-    Expected layouts:
+    Extract rows from word coordinates.
 
-    New PDF, without child ages:
-        2 0 0 0 0 CHECKED IN 2079404 7/6/2026 ORR 330 DIR
-
-    New PDF, with child ages:
-        1 2 0 0 2 2079405 7/6/2026 ORR 331 13-16 DIR
-
-    Old PDF, without source code:
-        2 0 0 0 0 CHECKED IN 2079404 7/6/2026 ORR 330
-
-    Old PDF, with child ages:
-        1 2 0 0 2 2079405 7/6/2026 ORR 331 13-16
+    This is considerably faster than page.extract_tables() and preserves
+    multi-line fields such as CHECKED IN and UDFD01's 0:00:00 time.
     """
+    words = page.extract_words(
+        use_text_flow=False,
+        keep_blank_chars=False,
+    )
 
-    text = clean_text(text)
+    if not words:
+        return []
 
-    if not text:
-        return None
+    # Every data row begins with the Adults value in the first column.
+    row_starts = sorted(
+        {
+            round(float(word["top"]), 3)
+            for word in words
+            if 50 <= float(word["x0"]) < 95
+            and clean_text(word["text"]).isdigit()
+            and float(word["top"]) > 90
+        }
+    )
 
-    tokens = text.split()
+    rows: list[dict] = []
 
-    if len(tokens) < 8:
-        return None
+    for index, row_top in enumerate(row_starts):
+        next_top = (
+            row_starts[index + 1]
+            if index + 1 < len(row_starts)
+            else page.height
+        )
 
-    # Las primeras cinco columnas siempre deben ser numéricas.
-    first_five = tokens[:5]
+        # A small tolerance keeps second-line values inside the row,
+        # while preventing words from the next row from being included.
+        row_bottom = next_top - 0.2
 
-    if not all(token.isdigit() for token in first_five):
-        return None
+        row = {
+            column: words_in_range(
+                words,
+                x_min,
+                x_max,
+                row_top - 0.5,
+                row_bottom,
+            )
+            for column, (x_min, x_max) in COLUMN_RANGES.items()
+        }
 
-    date_index = find_date_index(tokens[5:])
+        if DATE_RE.fullmatch(row.get("stay_date", "")):
+            rows.append(row)
 
-    if date_index is None:
-        return None
-
-    # Ajustar el índice porque buscamos desde tokens[5:].
-    date_index += 5
-
-    stay_date = tokens[date_index]
-
-    before_date = tokens[5:date_index]
-    after_date = tokens[date_index + 1:]
-
-    # Después de la fecha deben venir como mínimo Room Type y Room.
-    if len(after_date) < 2:
-        return None
-
-    adults = tokens[0]
-    children = tokens[1]
-    child_bucket_1 = tokens[2]
-    child_bucket_2 = tokens[3]
-    child_bucket_3 = tokens[4]
-
-    reservation_status = ""
-    confirmation_number = None
-
-    # El Confirmation Number, cuando aparece, es el último valor
-    # antes de Stay Date y contiene al menos seis dígitos.
-    if before_date and CONFIRMATION_RE.fullmatch(before_date[-1]):
-        confirmation_number = before_date[-1]
-        reservation_status = " ".join(before_date[:-1])
-
-    else:
-        reservation_status = " ".join(before_date)
-
-    room_type = after_date[0]
-    room_no = after_date[1]
-
-    extras = after_date[2:]
-
-    children_ages = ""
-    source_code = ""
-    rate_code = ""
-
-    # Nuevo layout después de Room:
-    #
-    #   [Children Ages] [Source Code] [Rate Code]
-    #
-    # Ejemplos:
-    #   13-16 DIR BA-PACK 8+
-    #   DIR COMP
-    #   TOP HOUSE
-    #
-    # Children Ages, cuando existe, siempre aparece primero.
-    if extras and CHILDREN_AGES_RE.fullmatch(extras[0]):
-        children_ages = extras.pop(0)
-
-    # Source Code aparece después de Children Ages.
-    # Debe comenzar con una letra: DIR, TOP, TRV, etc.
-    if extras and SOURCE_CODE_RE.fullmatch(extras[0]):
-        source_code = extras.pop(0)
-
-    # Todo lo restante pertenece a Rate Code.
-    # Se conserva unido porque puede contener espacios:
-    # BA-PACK 8+, SEPPKG TO, etc.
-    if extras:
-        rate_code = " ".join(extras)
-
-    return {
-        "adults": adults,
-        "children": children,
-        "child_bucket_1": child_bucket_1,
-        "child_bucket_2": child_bucket_2,
-        "child_bucket_3": child_bucket_3,
-        "reservation_status": clean_text(
-            reservation_status
-        ),
-        "confirmation_number": confirmation_number,
-        "stay_date": stay_date,
-        "room_type": clean_text(room_type),
-        "room_no": room_no,
-        "children_ages": clean_text(children_ages),
-        "source_code": clean_text(source_code),
-        "rate_code": clean_text(rate_code),
-    }
+    return rows
 
 
-def extract_text_fast(
-    pdf_path: Path,
-) -> list[str]:
-    lines: list[str] = []
+def extract_rows(pdf_path: Path) -> list[dict]:
+    rows: list[dict] = []
+
+    current_confirmation_number = ""
+    current_reservation_status = ""
 
     with pdfplumber.open(pdf_path) as pdf:
         total_pages = len(pdf.pages)
 
-        for page_no, page in enumerate(
-            pdf.pages,
-            start=1,
-        ):
-            text = page.extract_text() or ""
+        for page_number, page in enumerate(pdf.pages, start=1):
+            page_rows = extract_page_rows(page)
 
-            for raw in text.splitlines():
-                line = clean_text(raw)
-
-                if line:
-                    lines.append(line)
-
-            if page_no % 50 == 0:
-                print(
-                    f"snapshot: read "
-                    f"{page_no}/{total_pages} pages"
+            for row in page_rows:
+                confirmation_number = clean_text(
+                    row.get("confirmation_number")
                 )
 
-    return lines
+                if confirmation_number:
+                    current_confirmation_number = confirmation_number
+                else:
+                    row["confirmation_number"] = (
+                        current_confirmation_number
+                    )
+
+                reservation_status = clean_text(
+                    row.get("reservation_status")
+                )
+
+                if reservation_status:
+                    current_reservation_status = reservation_status
+                else:
+                    row["reservation_status"] = (
+                        current_reservation_status
+                    )
+
+                row["source_report"] = REPORT_NAME
+                row["source_file"] = pdf_path.name
+                row["_page_number"] = page_number
+
+                rows.append(row)
+
+            if page_number % 50 == 0:
+                print(
+                    f"snapshot: read "
+                    f"{page_number}/{total_pages} pages"
+                )
+
+    return rows
 
 
-def parse_snapshot(
-    pdf_path: str | Path,
-) -> pd.DataFrame:
+def parse_snapshot(pdf_path: str | Path) -> pd.DataFrame:
     pdf_path = Path(pdf_path)
 
-    rows: list[dict] = []
-
-    current_confirmation_number = None
-    current_reservation_status = None
-
-    lines = extract_text_fast(pdf_path)
-
-    for text in lines:
-        if is_noise(text):
-            continue
-
-        parsed = parse_line(text)
-
-        if not parsed:
-            continue
-
-        # Confirmation Number se muestra una vez por reserva
-        # y queda vacío en las líneas siguientes.
-        if parsed.get("confirmation_number"):
-            current_confirmation_number = parsed[
-                "confirmation_number"
-            ]
-        else:
-            parsed[
-                "confirmation_number"
-            ] = current_confirmation_number
-
-        # Reservation Status funciona igual:
-        # aparece al comienzo de cada bloque.
-        if parsed.get("reservation_status"):
-            current_reservation_status = parsed[
-                "reservation_status"
-            ]
-        else:
-            parsed[
-                "reservation_status"
-            ] = current_reservation_status
-
-        # IMPORTANTE:
-        # Source Code NO se arrastra.
-        # Una misma reserva puede cambiar de DIR a TOP
-        # dependiendo de la fecha de estadía.
-
-        parsed["source_report"] = REPORT_NAME
-        parsed["source_file"] = pdf_path.name
-
-        rows.append(parsed)
-
+    rows = extract_rows(pdf_path)
     df = pd.DataFrame(rows)
 
     if df.empty:
         return df
+
+    date_format = detect_date_format(
+        df["stay_date"].dropna().astype(str).tolist()
+    )
 
     for col in [
         "adults",
@@ -329,44 +298,36 @@ def parse_snapshot(
 
     for col in [
         "reservation_status",
-        "source_code",
-        "rate_code",
         "room_type",
         "children_ages",
+        "source_code",
+        "rate_code",
+        "first_name",
+        "last_name",
+        "vip_code",
     ]:
-        if col in df.columns:
+        if col not in df.columns:
+            df[col] = None
+        else:
             df[col] = df[col].apply(clean_text)
+            df[col] = df[col].replace("", None)
 
-    if "stay_date" in df.columns:
-        df["stay_date"] = df["stay_date"].apply(
-            to_iso_date
+    df["stay_date"] = df["stay_date"].apply(
+        lambda value: to_iso_date(value, date_format)
+    )
+
+    if "anniversary_date" not in df.columns:
+        df["anniversary_date"] = None
+    else:
+        df["anniversary_date"] = df["anniversary_date"].apply(
+            lambda value: to_iso_date(value, date_format)
         )
 
-    final_columns = [
-        "confirmation_number",
-        "reservation_status",
-        "stay_date",
-        "adults",
-        "children",
-        "child_bucket_1",
-        "child_bucket_2",
-        "child_bucket_3",
-        "room_type",
-        "room_no",
-        "children_ages",
-        "source_code",
-        "rate_code",
-        "source_report",
-        "source_file",
-    ]
+    for col in FINAL_COLUMNS:
+        if col not in df.columns:
+            df[col] = None
 
-    return df[
-        [
-            col
-            for col in final_columns
-            if col in df.columns
-        ]
-    ]
+    return df[FINAL_COLUMNS]
 
 
 def export_debug(
@@ -383,83 +344,16 @@ def export_debug(
         exist_ok=True,
     )
 
-    raw_lines = extract_text_fast(pdf_path)
+    raw_rows = extract_rows(pdf_path)
     parsed = parse_snapshot(pdf_path)
-
-    parsed_line_tests = []
-
-    for line_number, text in enumerate(
-        raw_lines,
-        start=1,
-    ):
-        parsed_line = parse_line(text)
-
-        parsed_line_tests.append(
-            {
-                "line_number": line_number,
-                "text": text,
-                "parsed": parsed_line is not None,
-                "confirmation_number": (
-                    parsed_line.get("confirmation_number")
-                    if parsed_line
-                    else None
-                ),
-                "stay_date": (
-                    parsed_line.get("stay_date")
-                    if parsed_line
-                    else None
-                ),
-                "room_type": (
-                    parsed_line.get("room_type")
-                    if parsed_line
-                    else None
-                ),
-                "room_no": (
-                    parsed_line.get("room_no")
-                    if parsed_line
-                    else None
-                ),
-                "children_ages": (
-                    parsed_line.get("children_ages")
-                    if parsed_line
-                    else None
-                ),
-                "source_code": (
-                    parsed_line.get("source_code")
-                    if parsed_line
-                    else None
-                ),
-                "rate_code": (
-                    parsed_line.get("rate_code")
-                    if parsed_line
-                    else None
-                ),
-            }
-        )
 
     with pd.ExcelWriter(
         output_path,
         engine="openpyxl",
     ) as writer:
-        pd.DataFrame(
-            {
-                "line_number": range(
-                    1,
-                    len(raw_lines) + 1,
-                ),
-                "text": raw_lines,
-            }
-        ).to_excel(
+        pd.DataFrame(raw_rows).to_excel(
             writer,
-            sheet_name="raw_lines",
-            index=False,
-        )
-
-        pd.DataFrame(
-            parsed_line_tests
-        ).to_excel(
-            writer,
-            sheet_name="line_tests",
+            sheet_name="raw_rows",
             index=False,
         )
 
@@ -474,15 +368,11 @@ def export_debug(
 
 if __name__ == "__main__":
     files = list(
-        Path("data/incoming").glob(
-            "snapshot*.pdf"
-        )
+        Path("data/incoming").glob("snapshot*.pdf")
     )
 
     files += list(
-        Path("data/incoming").glob(
-            "snapshot*.PDF"
-        )
+        Path("data/incoming").glob("snapshot*.PDF")
     )
 
     if not files:
