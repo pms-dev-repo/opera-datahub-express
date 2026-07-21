@@ -29,12 +29,12 @@ COLUMN_RANGES = {
     "room_type": (377, 406),
     "room_no": (406, 435),
     "children_ages": (435, 488),
-    "source_code": (488, 522),
-    "rate_code": (522, 577),
-    "anniversary_date": (577, 624),
-    "first_name": (624, 683),
-    "last_name": (683, 752),
-    "vip_code": (752, 800),
+    "source_code": (488, 520),
+    "rate_code": (520, 577),
+    "anniversary_date": (577, 622),
+    "first_name": (622, 681),
+    "last_name": (681, 750),
+    "vip_code": (750, 805),
 }
 
 
