@@ -13,12 +13,11 @@ visual grouping remain in ``src.core.pdf``.
 from datetime import datetime
 from pathlib import Path
 import re
-import time
 from typing import Any, Iterable, Mapping, Sequence
 
 import pandas as pd
 
-from src.core.pdf.pdf_engine import PdfEngine, PdfEngineError
+from src.core.pdf.pdf_engine import PdfEngine
 from src.core.pdf.reservation_block_builder import ReservationBlockBuilder
 
 
@@ -41,6 +40,9 @@ KNOWN_VIP_CODES = {
     "NEW",
     "PRE",
     "PLAT",
+    "EO",
+    "TEN",
+    "GDP",
     "T",
     "C",
     "CT",
@@ -72,105 +74,6 @@ FINAL_COLUMNS = [
     "source_report",
     "source_file",
 ]
-
-
-class InvalidPdfError(RuntimeError):
-    """Raised when the input file is missing, incomplete or not a valid PDF."""
-
-
-def _wait_until_file_stable(
-    path: Path,
-    *,
-    checks: int = 5,
-    interval_seconds: float = 1.0,
-) -> None:
-    """Wait until the PDF size remains unchanged between consecutive checks."""
-    if not path.exists():
-        raise FileNotFoundError(f"PDF not found: {path}")
-
-    previous_size: int | None = None
-
-    for _ in range(max(1, checks)):
-        current_size = path.stat().st_size
-
-        if previous_size is not None and current_size == previous_size:
-            return
-
-        previous_size = current_size
-        time.sleep(max(0.0, interval_seconds))
-
-
-def _validate_pdf(path: Path) -> None:
-    """Perform inexpensive structural checks before invoking the PDF engine."""
-    if not path.exists():
-        raise FileNotFoundError(f"PDF not found: {path}")
-
-    if not path.is_file():
-        raise InvalidPdfError(f"PDF path is not a file: {path}")
-
-    file_size = path.stat().st_size
-
-    if file_size == 0:
-        raise InvalidPdfError(f"Empty PDF: {path.name}")
-
-    with path.open("rb") as pdf_file:
-        header = pdf_file.read(5)
-
-        if header != b"%PDF-":
-            raise InvalidPdfError(
-                f"Invalid PDF header in {path.name}"
-            )
-
-        tail_size = min(file_size, 8192)
-        pdf_file.seek(-tail_size, 2)
-        tail = pdf_file.read(tail_size)
-
-    if b"%%EOF" not in tail:
-        raise InvalidPdfError(
-            f"PDF appears truncated (missing %%EOF): "
-            f"{path.name} ({file_size} bytes)"
-        )
-
-
-def _build_reservation_blocks_with_retry(
-    path: Path,
-    *,
-    strict: bool,
-    attempts: int = 3,
-    retry_delay_seconds: float = 5.0,
-) -> tuple[PdfEngine, ReservationBlockBuilder, list[Any]]:
-    """Open and interpret the PDF, retrying temporary engine failures."""
-    last_error: Exception | None = None
-
-    for attempt in range(1, max(1, attempts) + 1):
-        try:
-            _wait_until_file_stable(path)
-            _validate_pdf(path)
-
-            engine = PdfEngine(path)
-            builder = ReservationBlockBuilder(strict=strict)
-            blocks = list(builder.build_from_engine(engine))
-
-            return engine, builder, blocks
-
-        except InvalidPdfError:
-            raise
-
-        except PdfEngineError as exc:
-            last_error = exc
-
-            print(
-                f"[ARRIVAL] {path.name} | "
-                f"attempt {attempt}/{attempts} failed | {exc}"
-            )
-
-            if attempt < attempts:
-                time.sleep(max(0.0, retry_delay_seconds))
-
-    raise PdfEngineError(
-        f"Could not parse {path.name} after {attempts} attempts: "
-        f"{last_error}"
-    ) from last_error
 
 
 class ArrivalParserError(RuntimeError):
@@ -290,6 +193,27 @@ def parse_main_line(text: str) -> dict[str, Any]:
     }
 
 
+
+
+def _looks_like_vip(value: Any) -> bool:
+    """Return True when a token can safely be interpreted as a VIP code.
+
+    OPERA properties may use hotel-specific alphabetic VIP codes that are
+    not present in a fixed catalogue (for example EO, TEN or GDP). The token
+    must be short and alphabetic so room numbers, times and flight numbers
+    are not mistaken for VIP codes.
+    """
+    candidate = clean_text(value).upper()
+
+    if not candidate:
+        return False
+
+    if candidate in KNOWN_VIP_CODES:
+        return True
+
+    return candidate.isalpha() and 1 <= len(candidate) <= 6
+
+
 def _looks_like_flight(value: str) -> bool:
     normalized = clean_text(value).upper().replace(" ", "")
     return re.match(r"^[A-Z0-9]{2,}\d+$", normalized) is not None
@@ -355,7 +279,7 @@ def parse_detail_line(text: str) -> dict[str, Any]:
     prefix = list(body[:first_boundary])
     vip = ""
 
-    if prefix and clean_text(prefix[0]).upper() in KNOWN_VIP_CODES:
+    if prefix and _looks_like_vip(prefix[0]):
         vip = clean_text(prefix.pop(0)).upper()
 
     last_room = ""
@@ -378,7 +302,7 @@ def parse_detail_line(text: str) -> dict[str, Any]:
     elif method_index is not None:
         before_method = list(body[:method_index])
 
-        if before_method and clean_text(before_method[0]).upper() in KNOWN_VIP_CODES:
+        if before_method and _looks_like_vip(before_method[0]):
             if not vip:
                 vip = clean_text(before_method[0]).upper()
             before_method = before_method[1:]
@@ -399,7 +323,7 @@ def parse_detail_line(text: str) -> dict[str, Any]:
     else:
         remaining = list(body)
 
-        if remaining and clean_text(remaining[0]).upper() in KNOWN_VIP_CODES:
+        if remaining and _looks_like_vip(remaining[0]):
             if not vip:
                 vip = clean_text(remaining[0]).upper()
             remaining = remaining[1:]
@@ -599,18 +523,13 @@ def parse_odata_arr_detail_v2(
     pdf_path: str | Path,
     *,
     strict: bool = False,
-    attempts: int = 3,
-    retry_delay_seconds: float = 5.0,
 ) -> pd.DataFrame:
-    """Parse one ODATA Arrivals Detail PDF with validation and retries."""
+    """Parse one ODATA Arrivals Detail PDF with the new pipeline."""
     path = Path(pdf_path)
 
-    _, _, blocks = _build_reservation_blocks_with_retry(
-        path,
-        strict=strict,
-        attempts=attempts,
-        retry_delay_seconds=retry_delay_seconds,
-    )
+    engine = PdfEngine(path)
+    builder = ReservationBlockBuilder(strict=strict)
+    blocks = builder.build_from_engine(engine)
 
     parser = ArrivalParserV2(strict=strict)
     return parser.parse_blocks(
@@ -632,12 +551,9 @@ def export_debug_v2(
     path = Path(pdf_path)
     destination = Path(output_path)
 
-    engine, builder, reservation_blocks = (
-        _build_reservation_blocks_with_retry(
-            path,
-            strict=strict,
-        )
-    )
+    engine = PdfEngine(path)
+    builder = ReservationBlockBuilder(strict=strict)
+    reservation_blocks = builder.build_from_engine(engine)
 
     parser = ArrivalParserV2(strict=strict)
     parsed = parser.parse_blocks(
